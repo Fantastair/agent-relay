@@ -1,7 +1,4 @@
-data/
-data-dev/
-data-preview/
-data-images/
+/data*/
 .preview-*/
 .backup-*/
 assets/
@@ -18,4 +15,11 @@ scripts/diagnose-codex.mjs
 scripts/inspect-adapters.mjs
 scripts/inspect-codex-history.mjs
 scripts/inspect-dsh-shapes.mjs
-scripts/discover-dsh.ps1
+scripts/verify-binding-http.mjs
+scripts/verify-context-fix.mjs
+*.key
+*.pem
+.env
+.env.*
+!.env.example
+/public/avatar.local.css

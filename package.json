@@ -1,6 +1,10 @@
 {
   "name": "native-agent-relay",
   "version": "0.1.0",
+  "license": "MIT",
+  "repository": {"type": "git", "url": "git+https://github.com/Fantastair/agent-relay.git"},
+  "homepage": "https://github.com/Fantastair/agent-relay#readme",
+  "bugs": {"url": "https://github.com/Fantastair/agent-relay/issues"},
   "private": true,
   "type": "module",
   "description": "Local relay between native Codex and DeepSeek Harness sessions",

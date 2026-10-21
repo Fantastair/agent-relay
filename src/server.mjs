@@ -16,7 +16,7 @@ const root=fileURLToPath(new URL('../',import.meta.url));
 export async function makeService({dataDir=path.join(root,'data'),config={},adapters,quotaOptions}={}){
   await mkdir(dataDir,{recursive:true});let key;try{key=(await readFile(path.join(dataDir,'control.key'),'utf8')).trim();}catch{key=randomBytes(32).toString('hex');await writeFile(path.join(dataDir,'control.key'),key,{mode:0o600});}
   const store=new Store(path.join(dataDir,'relay.sqlite'));store.set('paused',true);
-  const c=adapters?.codex||new CodexAdapter({...config.codex,sourceThreadId:config.codex?.sourceThreadId||'01a15c14-68f0-7f20-9e27-453598b5de2e'}),d=adapters?.deepseek||new DshAdapter(config.deepseek),images=new ImageStore(store,dataDir);const relay=new Relay(store,{codex:c,deepseek:d},{images});
+  const c=adapters?.codex||new CodexAdapter(config.codex),d=adapters?.deepseek||new DshAdapter(config.deepseek),images=new ImageStore(store,dataDir);const relay=new Relay(store,{codex:c,deepseek:d},{images});
   const catalog=new CatalogCache(catalogLoaders(c,d));
   const quota=new QuotaCache({dataDir,codex:c,deepseek:d,...quotaOptions});
   let provisioning=false;

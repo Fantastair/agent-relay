@@ -547,6 +547,20 @@ function renderTimeline() {
   }
 }
 
+function avatarNode(sender) {
+  const box = el('div', 'avatar avatar--' + sender, INITIALS[sender] || '?');
+  let src = null;
+  try { src = localStorage.getItem('relay.avatar.' + sender); } catch {}
+  if (src) {
+    const img = el('img');
+    img.src = src;
+    img.alt = '';
+    box.replaceChildren(img);
+    box.classList.add('has-img');
+  }
+  return box;
+}
+
 function messageNode(m, prev, index) {
   const mine = m.sender === 'user';
   const cont = !!prev && prev.sender === m.sender;
@@ -558,7 +572,7 @@ function messageNode(m, prev, index) {
   if (index === 0) row.classList.add('first');
   row.dataset.id = m.id;
 
-  row.append(el('div', 'avatar avatar--' + m.sender, INITIALS[m.sender] || '?'));
+  row.append(avatarNode(m.sender));
   const main = el('div', 'msg-main');
 
   if (!cont) {
