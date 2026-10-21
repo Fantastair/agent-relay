@@ -549,15 +549,18 @@ function renderTimeline() {
 
 function avatarNode(sender) {
   const box = el('div', 'avatar avatar--' + sender, INITIALS[sender] || '?');
-  let src = null;
-  try { src = localStorage.getItem('relay.avatar.' + sender); } catch {}
-  if (src) {
-    const img = el('img');
-    img.src = src;
-    img.alt = '';
-    box.replaceChildren(img);
-    box.classList.add('has-img');
-  }
+  let stored = null;
+  try { stored = localStorage.getItem('relay.avatar.' + sender); } catch {}
+  const src = stored || ('/local-avatar/' + sender);
+  const img = el('img');
+  img.alt = '';
+  img.onerror = () => {
+    box.classList.remove('has-img');
+    box.replaceChildren(document.createTextNode(INITIALS[sender] || '?'));
+  };
+  img.src = src;
+  box.replaceChildren(img);
+  box.classList.add('has-img');
   return box;
 }
 
