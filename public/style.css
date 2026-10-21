@@ -587,4 +587,19 @@ dialog::backdrop{background:rgba(16,26,40,.42);backdrop-filter:blur(2px)}
   .md-images a{border-color:var(--line-2)}
   .conn-sub{color:var(--muted)}
   .quota-name{color:var(--muted)}
+  /* 名称与角标：暗色下提高对比度 */
+  .msg--codex .name{color:#9dbcff}
+  .msg--deepseek .name{color:#c3aaf7}
+  .msg--user .name{color:#a9c1dc}
+  .chip.ok{background:#12261c;border-color:#1f4a35;color:#6fd3a1}
+  .chip.warn{background:#2a2113;border-color:#4a3a1c;color:#f0c987}
+  .chip.bad{background:#2b1715;border-color:#4d2823;color:#ef9a90}
+  .chip.info{background:#14202e;border-color:#2a3f57;color:#9dc0e8}
+  /* 用户气泡内的表头保持白字、加深底色 */
+  .msg--user .md-table th{background:rgba(0,0,0,.22);border-color:rgba(255,255,255,.38);color:#fff}
+  /* 只读提示、危险按钮、归档 hover */
+  .readonly-bar{background:#2a2314;border-color:#4a3a1c;color:#f0c987}
+  .btn.danger{background:#2b1715;border-color:#4d2823;color:#ef9a90}
+  .rooms-archived summary:hover{background:#1a2330;color:var(--ink)}
+  .conn-quota{color:#9dc0e8}
 }
