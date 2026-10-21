@@ -200,10 +200,10 @@ a{color:var(--blue)}
 .msg.first.new-turn::before{display:none}
 
 .avatar{
-  flex:0 0 32px;width:32px;height:32px;border-radius:10px;
+  flex:0 0 32px;width:32px;height:32px;border-radius:50%;
   display:grid;place-items:center;
   color:#fff;font-size:12px;font-weight:700;letter-spacing:.02em;
-  margin-top:20px;user-select:none;
+  margin-top:20px;user-select:none;overflow:hidden;
 }
 .msg--codex .avatar{background:var(--blue)}
 .msg--deepseek .avatar{background:var(--purple)}
@@ -500,7 +500,7 @@ dialog::backdrop{background:rgba(16,26,40,.42);backdrop-filter:blur(2px)}
 }
 /* avatars — 通用占位，不使用任何第三方商标或肖像 */
 /* 本机可用 localStorage 的 relay.avatar.<sender> 覆盖为自定义头像（不入库） */
-.avatar.has-img{background-image:none!important}
+.avatar.has-img{background:transparent!important}
 .avatar img{width:100%;height:100%;object-fit:cover;display:block;border-radius:50%}
 /* ---------- markdown ---------- */
 .md-h{font-weight:700;margin:7px 0 2px;line-height:1.45}

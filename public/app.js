@@ -1095,10 +1095,10 @@ $('composer').addEventListener('submit', (e) => {
 });
 
 $('message').addEventListener('keydown', (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-    e.preventDefault();
-    $('composer').requestSubmit();
-  }
+  if (e.key !== 'Enter' || e.isComposing) return;
+  if (e.shiftKey) return; // Shift+Enter 换行
+  e.preventDefault();
+  $('composer').requestSubmit();
 });
 
 $('pick-image').addEventListener('click', () => $('image-input').click());
