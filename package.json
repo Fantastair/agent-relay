@@ -1,0 +1,9 @@
+{
+  "name": "native-agent-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local relay between native Codex and DeepSeek Harness sessions",
+  "engines": {"node": ">=24"},
+  "scripts": {"start": "node src/server.mjs", "test": "node --test test/*.test.mjs", "doctor": "node scripts/doctor.mjs"}
+}

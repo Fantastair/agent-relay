@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>中转台 · 原生 Agent 协作</title>
+<link rel="stylesheet" href="/style.css">
+<script type="module" src="/app.js"></script>
+</head>
+<body>
+<div class="app" id="app">
+
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-head">
+      <a class="brand" href="/" aria-label="中转台首页"><span class="brand-mark" aria-hidden="true">⇄</span><span class="brand-text">中转台</span></a>
+      <button class="icon-btn sidebar-close" id="sidebar-close" aria-label="收起会话列表">×</button>
+    </div>
+
+    <button class="new-topic" id="new-room" hidden><span aria-hidden="true">＋</span> 新话题</button>
+
+    <nav class="room-list" id="rooms" aria-label="话题列表"></nav>
+
+    <div class="side-block">
+      <div class="side-label">原生会话</div>
+      <div id="connections"></div>
+    </div>
+
+    <div class="sidebar-foot">
+      <button id="open-settings" class="btn ghost wide">连接与设置</button>
+      <p class="local-note"><span class="dot" aria-hidden="true"></span> 只在本机运行<br><small>工具与审批仍在各自应用中</small></p>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <button class="icon-btn only-narrow" id="menu" aria-label="打开会话列表">☰</button>
+      <div class="room-heading">
+        <h1 id="room-title">本地协作</h1>
+        <p id="room-sub">一条消息，同时送达两个 Agent</p>
+      </div>
+      <div class="topbar-actions">
+        <button id="activity-toggle" class="btn ghost only-narrow">进度</button>
+        <button id="export" class="btn ghost">导出</button>
+        <button id="pause" class="btn primary">开始投递</button>
+      </div>
+    </header>
+
+    <div id="banner" class="banner" role="status" hidden></div>
+
+    <section id="timeline" class="timeline" aria-label="群聊记录"></section>
+
+    <button id="jump-latest" class="jump-latest" hidden>↓ 回到最新</button>
+
+    <div id="readonly-bar" class="readonly-bar" hidden>
+      <span id="readonly-text">浏览历史话题，只读。</span>
+      <span class="readonly-actions">
+        <button id="resume-room" class="btn primary" type="button">继续此话题</button>
+        <button id="back-active" class="btn ghost" type="button">返回当前话题</button>
+      </span>
+    </div>
+
+    <form id="composer" class="composer">
+      <div class="composer-box">
+        <label class="sr-only" for="message">消息内容</label>
+        <div id="attachments" class="attachments" hidden></div>
+        <textarea id="message" rows="1" placeholder="描述任务或补充要求，这条消息默认发送给 Codex 和 DeepSeek…" maxlength="100000"></textarea>
+        <div class="composer-bar">
+          <input id="image-input" type="file" accept="image/*" multiple hidden>
+          <button id="pick-image" class="btn ghost icon-text" type="button" title="添加图片（最多 4 张）">图片</button>
+          <label class="target"><span>发送给</span><select id="target"><option value="both">两个 Agent</option><option value="codex">Codex</option><option value="deepseek">DeepSeek</option></select></label>
+          <span class="hint">Ctrl + Enter 发送</span>
+          <button id="send" type="submit" class="btn primary send">发送</button>
+        </div>
+      </div>
+      <p id="compose-note" class="compose-note">来源会明确标记，两边分别保存原生记录。</p>
+    </form>
+  </main>
+
+  <aside class="activity" id="activity" aria-label="协作进度">
+    <div class="activity-head">
+      <h2>协作进度 <span id="queue-count" class="count">0</span></h2>
+      <button class="icon-btn activity-close only-narrow" id="activity-close" aria-label="收起进度面板">×</button>
+    </div>
+    <div class="panel">
+      <label class="field">回复转发
+        <select id="mode"><option value="auto">自动转给另一位 Agent</option><option value="manual">由我手动转发</option></select>
+      </label>
+      <label class="field">每条任务的自动投递上限
+        <select id="budget"><option value="2">2 次</option><option value="4">4 次</option><option value="6">6 次</option><option value="10">10 次</option><option value="20">20 次</option></select>
+      </label>
+      <p class="aside-note">达到上限、Agent 明确结束或等待你回答时，自动协作停止。</p>
+    </div>
+    <div class="panel">
+      <div class="panel-title">投递队列</div>
+      <div id="jobs"></div>
+    </div>
+    <details class="panel logs">
+      <summary>连接与运行记录</summary>
+      <div id="logs"></div>
+    </details>
+  </aside>
+</div>
+
+<div id="backdrop" class="backdrop" hidden></div>
+<div id="toast" class="toast" role="alert" hidden></div>
+
+<dialog id="settings-dialog">
+  <div class="dialog-head">
+    <div><h2>连接原生会话</h2><p>指定两边已有的会话，无需新建；也可单独选择新建一对。</p></div>
+    <button id="close-settings" class="icon-btn" aria-label="关闭设置">×</button>
+  </div>
+  <div id="setup-status" class="setup-status"></div>
+  <div class="dialog-cols">
+    <label class="field">回复转发
+      <select id="dialog-mode"><option value="auto">自动转给另一位 Agent</option><option value="manual">由我手动转发</option></select>
+    </label>
+    <label class="field">自动投递上限
+      <select id="dialog-budget"><option value="2">2 次</option><option value="4">4 次</option><option value="6">6 次</option><option value="10">10 次</option><option value="20">20 次</option></select>
+    </label>
+  </div>
+  <section class="dialog-section">
+    <h3>指定已有会话</h3>
+    <label class="field">Codex 会话
+      <select id="codex-session"></select>
+      <input id="codex-id" type="text" autocomplete="off" placeholder="或直接粘贴 Codex 会话 ID">
+    </label>
+    <label class="field">DeepSeek 会话
+      <select id="deepseek-session"></select>
+      <input id="deepseek-id" type="text" autocomplete="off" placeholder="或直接粘贴 DeepSeek 会话 ID">
+    </label>
+    <button id="bind-pair" class="btn primary">保存两边的绑定</button>
+    <p class="fine">先核对两边均为空闲会话。保存会暂停投递，已有历史不会自动重放。</p>
+  </section>
+  <section class="dialog-section">
+    <h3>可选：新建一对会话</h3>
+    <label class="field">共同工作区
+      <select id="workspace"></select>
+    </label>
+    <button id="provision" class="btn primary">创建并连接两边</button>
+    <p class="fine">每次点击都新建一对会话，两边就绪后才切换绑定。旧会话和中转记录保留；DeepSeek 新会话会加入工作区。</p>
+  </section>
+  <p class="dialog-note">本地凭据仅由服务读取使用，不显示在页面或写入聊天。需要批准的操作请回原应用处理。</p>
+</dialog>
+</body>
+</html>

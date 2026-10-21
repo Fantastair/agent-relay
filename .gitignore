@@ -1,0 +1,21 @@
+data/
+data-dev/
+data-preview/
+data-images/
+.preview-*/
+.backup-*/
+assets/
+quota/
+*.log
+node_modules/
+config.local.json
+*.sqlite
+*.sqlite-*
+tmp-*
+# 机器专用诊断与历史验收记录（只保留在本地）
+VERIFICATION.md
+scripts/diagnose-codex.mjs
+scripts/inspect-adapters.mjs
+scripts/inspect-codex-history.mjs
+scripts/inspect-dsh-shapes.mjs
+scripts/discover-dsh.ps1
