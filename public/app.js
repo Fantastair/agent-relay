@@ -1196,6 +1196,42 @@ $('settings-dialog').addEventListener('click', (e) => {
 
 $('empty-settings')?.addEventListener('click', () => void openSettings());
 
+async function compressAvatar(file) {
+  const bitmap = await createImageBitmap(file);
+  const side = Math.min(bitmap.width, bitmap.height);
+  const canvas = document.createElement('canvas');
+  canvas.width = 96;
+  canvas.height = 96;
+  canvas.getContext('2d').drawImage(bitmap, (bitmap.width - side) / 2, (bitmap.height - side) / 2, side, side, 0, 0, 96, 96);
+  return canvas.toDataURL('image/jpeg', 0.86);
+}
+
+function applyAvatars() {
+  S.signature = '';
+  renderChrome();
+  renderTimeline();
+}
+
+for (const input of document.querySelectorAll('input[data-avatar]')) {
+  input.addEventListener('change', () => void act(async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    const dataUrl = await compressAvatar(file);
+    localStorage.setItem('relay.avatar.' + input.dataset.avatar, dataUrl);
+    applyAvatars();
+    toast('头像已更新（仅保存在本机浏览器）');
+    input.value = '';
+  }));
+}
+
+$('reset-avatars')?.addEventListener('click', () => {
+  for (const side of ['user', 'codex', 'deepseek']) {
+    try { localStorage.removeItem('relay.avatar.' + side); } catch {}
+  }
+  applyAvatars();
+  toast('已恢复默认占位头像');
+});
+
 for (const side of ['codex', 'deepseek']) {
   $(side + '-id').addEventListener('input', () => { $(side + '-session').value = ''; });
   $(side + '-session').addEventListener('change', () => { $(side + '-id').value = ''; });

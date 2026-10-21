@@ -140,6 +140,16 @@
     <button id="provision" class="btn primary">创建并连接两边</button>
     <p class="fine">每次点击都新建一对会话，两边就绪后才切换绑定。旧会话和中转记录保留；DeepSeek 新会话会加入工作区。</p>
   </section>
+  <section class="dialog-section">
+    <h3>本机头像</h3>
+    <p class="fine">只保存在当前浏览器（localStorage），不上传、不写入仓库；公开版本始终是占位。</p>
+    <div class="avatar-settings">
+      <label class="avatar-row"><span>你</span><input type="file" accept="image/*" data-avatar="user"></label>
+      <label class="avatar-row"><span>Codex</span><input type="file" accept="image/*" data-avatar="codex"></label>
+      <label class="avatar-row"><span>DeepSeek</span><input type="file" accept="image/*" data-avatar="deepseek"></label>
+    </div>
+    <button id="reset-avatars" class="btn ghost" type="button">恢复默认占位</button>
+  </section>
   <p class="dialog-note">本地凭据仅由服务读取使用，不显示在页面或写入聊天。需要批准的操作请回原应用处理。</p>
 </dialog>
 </body>
