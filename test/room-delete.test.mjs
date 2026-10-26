@@ -127,6 +127,7 @@ test('HTTP deletion enforces local authentication, CSRF and 404/409 contract, an
     const response=await post({roomId:old.id});assert.equal(response.status,200);assert.equal((await response.json()).selectedRoomId,active);
     assert.equal((await post({roomId:old.id})).status,404);assert(service.store.room(other.id));
     const state=await (await fetch(base+'/api/state',{headers:{cookie}})).json();assert.equal(state.roomId,active);assert(!state.rooms.some(r=>r.id===old.id));
+    const stale=await fetch(base+'/api/state?roomId='+old.id,{headers:{cookie}});assert.equal(stale.status,200);assert.equal((await stale.json()).roomId,active);
     assert((await (await fetch(base+'/api/health')).json()).features.includes('room-delete-v1'));
   }finally{await service.close();await rm(dir,{recursive:true,force:true});}
 });
