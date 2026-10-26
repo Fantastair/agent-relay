@@ -27,6 +27,17 @@ export class Store{
       this.db.exec(`CREATE TABLE IF NOT EXISTS deleted_relay_refs(kind TEXT NOT NULL,ref TEXT NOT NULL,side TEXT NOT NULL DEFAULT '',session_id TEXT NOT NULL DEFAULT '',PRIMARY KEY(kind,ref,side,session_id));`);
       this.db.exec('CREATE TABLE IF NOT EXISTS room_options(room_id TEXT PRIMARY KEY REFERENCES rooms(id),value TEXT NOT NULL)');
       for(const room of this.rooms())if(!this.db.prepare('SELECT 1 FROM room_options WHERE room_id=?').get(room.id))this.writeRoomOptions(room.id,{paused:room.id===active?this.get('paused',true):true,mode:this.get('mode','auto'),maxTurns:this.get('maxTurns',6),protocolReady:this.get('protocolReady',{}),imageCapabilities:this.get('imageCapabilities',{})});
+      this.db.exec('CREATE TABLE IF NOT EXISTS image_capabilities(side TEXT NOT NULL,session_id TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(side,session_id))');
+      if(!this.get('imageCapabilityRegistryMigrated',false)){
+        const maps=[this.get('imageCapabilities',{})];
+        for(const row of this.db.prepare('SELECT value FROM room_options').all())try{maps.push(JSON.parse(row.value).imageCapabilities);}catch{}
+        for(const map of maps)for(const side of ['codex','deepseek']){
+          const entry=map?.[side];if(!entry||typeof entry.sessionId!=='string'||!entry.sessionId||entry.sessionId.length>256||typeof entry.supportsImages!=='boolean')continue;
+          const checkedAt=Number.isFinite(entry.checkedAt)?entry.checkedAt:0,old=this.imageCapability(side,entry.sessionId);
+          if(!old||checkedAt>old.checkedAt||(checkedAt===old.checkedAt&&entry.supportsImages===false))this.rememberImageCapability(side,{...entry,checkedAt});
+        }
+        this.set('imageCapabilityRegistryMigrated',true);
+      }
       this.db.exec('CREATE INDEX IF NOT EXISTS message_room ON messages(room_id,created_at);CREATE INDEX IF NOT EXISTS delivery_room ON deliveries(room_id,side,status);CREATE INDEX IF NOT EXISTS log_room ON logs(room_id,id)');
       this.db.prepare("UPDATE deliveries SET status='unknown',error='服务重启时投递尚未确认，正在回查原生记录',updated_at=? WHERE status='sending'").run(Date.now());
       this.db.prepare("UPDATE batches SET status='unknown',error='服务重启时整批投递尚未确认，正在回查原生记录',updated_at=? WHERE status='sending'").run(Date.now());
@@ -41,6 +52,12 @@ export class Store{
   roomOptions(roomId){this.requireRoom(roomId);const row=this.db.prepare('SELECT value FROM room_options WHERE room_id=?').get(roomId);return {paused:true,mode:'auto',maxTurns:6,...(row?JSON.parse(row.value):{})};}
   writeRoomOptions(roomId,options){this.requireRoom(roomId);this.db.prepare('INSERT INTO room_options(room_id,value) VALUES(?,?) ON CONFLICT(room_id) DO UPDATE SET value=excluded.value').run(roomId,JSON.stringify(options));}
   patchRoomOptions(roomId,changes){this.writeRoomOptions(roomId,{...this.roomOptions(roomId),...changes});return this.roomOptions(roomId);}
+  imageCapability(side,sessionId){const row=this.db.prepare('SELECT value FROM image_capabilities WHERE side=? AND session_id=?').get(side,sessionId??'');return row?JSON.parse(row.value):null;}
+  rememberImageCapability(side,{sessionId,supportsImages,checkedAt=Date.now()}){
+    if(!['codex','deepseek'].includes(side)||typeof sessionId!=='string'||!sessionId||sessionId.length>256||typeof supportsImages!=='boolean'||!Number.isFinite(checkedAt))throw new RelayError('图像能力声明无效','input');
+    const entry={sessionId,supportsImages,imageMode:'file-tools',checkedAt};
+    this.db.prepare('INSERT INTO image_capabilities(side,session_id,value) VALUES(?,?,?) ON CONFLICT(side,session_id) DO UPDATE SET value=excluded.value').run(side,sessionId,JSON.stringify(entry));return entry;
+  }
   bindingConflicts(roomId,bindings=this.requireRoom(roomId)){
     return [['codex','codexId','codex_id'],['deepseek','deepseekId','deepseek_id']].flatMap(([side,key,column])=>bindings[key]?this.db.prepare(`SELECT id,title FROM rooms WHERE id<>? AND ${column}=? ORDER BY created_at,rowid`).all(roomId,bindings[key]).map(room=>({side,roomId:room.id,title:room.title})):[]);
   }

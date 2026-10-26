@@ -43,12 +43,26 @@ test('PNG, JPEG and WebP metadata is read from image headers, not client dimensi
   const webp=Buffer.alloc(30);webp.write('RIFF');webp.writeUInt32LE(22,4);webp.write('WEBP',8);webp.write('VP8X',12);webp.writeUInt32LE(10,16);webp.writeUIntLE(39,24,3);webp.writeUIntLE(49,27,3);assert.deepEqual(imageDimensions(webp,'image/webp'),{w:40,h:50});
 });
 
-test('capability defaults unknown, is bound to the actual session, and unknown never admits an image message',async()=>{
+test('unknown capabilities permit file-tool delivery without claiming support, while explicit false blocks images',async()=>{
   const h=await harness();try{
     const image=await h.images.upload({dataUrl});assert.equal(h.relay.state().health.codex.supportsImages,'unknown');
-    assert.throws(()=>h.relay.sendMessage({imageIds:[image.id]}),/尚未确认/);assert.equal(h.store.state().messages.length,0);
+    h.relay.sendMessage({imageIds:[image.id],targets:['codex']});await h.relay.tick('codex');
+    assert.equal(h.adapters.codex.sent.length,1);assert(h.adapters.codex.sent[0].text.includes(image.path));assert.equal(h.relay.imageCapability('codex').supportsImages,'unknown');
+    h.relay.confirmImageCapability({side:'codex',sessionId:'c',supportsImages:false});
+    assert.throws(()=>h.relay.sendMessage({imageIds:[image.id],targets:['codex']}),/不支持/);assert.equal(h.store.state().messages.length,1);
     capable(h);assert.equal(h.relay.state().health.codex.supportsImages,true);assert.equal(h.relay.state().health.codex.imageMode,'file-tools');
     h.store.set('codexId','different');assert.equal(h.relay.state().health.codex.supportsImages,'unknown');assert.throws(()=>h.relay.confirmImageCapability({side:'codex',sessionId:'c',supportsImages:true}),/当前绑定/);
+  }finally{await h.close();}
+});
+
+test('a capability denial during attachment verification prevents the native send',async()=>{
+  const h=await harness();try{
+    const image=await h.images.upload({dataUrl}),message=h.relay.sendMessage({imageIds:[image.id],targets:['codex']});
+    const original=h.images.read.bind(h.images);let enter,release;const entered=new Promise(resolve=>enter=resolve),gate=new Promise(resolve=>release=resolve);
+    h.images.read=async imageId=>{enter();await gate;return original(imageId);};
+    const pending=h.relay.tick('codex');await entered;
+    h.relay.confirmImageCapability({side:'codex',sessionId:'c',supportsImages:false});release();await pending;
+    assert.equal(h.adapters.codex.sent.length,0);assert.equal(h.store.forMessage(message.id,'codex').status,'blocked');
   }finally{await h.close();}
 });
 

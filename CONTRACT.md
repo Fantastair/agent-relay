@@ -272,13 +272,13 @@ M1/M3/M4/M5 沿用已确认实现；M2 双方同意不按超时自动判空闲�
 - `POST /api/image {dataUrl}`，cookie仍需同源和 `X-Relay-UI: 1`，Bearer亦可。返回 `{image:{id,url,path,mime,w,h,bytes,sha256,createdAt}}`。`url` 为 `/api/image/<UUID>`；`path` 为服务器生成的绝对路径。文件保存在当前数据目录的 `images/`，SQLite保存元数据；不接受调用方指定路径或文件名。
 - 允许PNG/JPEG/WebP，检查Base64、文件头、尺寸与大小。单图最多1 MiB、2000万像素；上传JSON请求最多2 MiB，其他JSON仍限制256000字节。前端按双方约定压缩到1600px/400KB。拒绝SVG和伪装MIME；服务不对压缩图片做完整像素解码，实际能否解码仍由浏览器/图像工具验证。
 - `GET /api/image/:id` 必须认证；固定MIME及nosniff，不开放任意文件读取。读取时核对大小及SHA256，拒绝损坏、变化或符号链接文件。CSP允许 `blob:`，用于本地选择预览。
-- `POST /api/message` 增加 `imageIds:[]`，最多4个不同ID，允许文字为空的纯图片消息。未知图片、重复ID或无能力的目标均在创建消息前拒绝。保存 `meta.images[]` 与兼容字段 `meta.image=首张`。相同 `clientMessageId` 的幂等比较包括图片ID及其顺序。导出保留这些元数据和路径，JSON本身不打包图片二进制。
+- `POST /api/message` 增加 `imageIds:[]`，最多4个不同ID，允许文字为空的纯图片消息。未知图片、重复ID或明确声明不支持读图的目标均在创建消息前拒绝；能力待确认的文件路径投递按第16节处理。保存 `meta.images[]` 与兼容字段 `meta.image=首张`。相同 `clientMessageId` 的幂等比较包括图片ID及其顺序。导出保留这些元数据和路径，JSON本身不打包图片二进制。
 - 原生适配器仍发送文字信封，其中追加每张 `[图片 #id] <绝对路径>` 和实际调用图像读取工具的提示。普通和批次投递均保留图片引用，投递前复核文件及接收方能力；文件丢失或变化时阻止发送并暂停，不静默丢图。缩略图显示和原生文字准入均不等于模型读图完成。
 
 ### 图片能力
 
 - `/api/health.features` 增加 `image-attachments-v1`、`image-capabilities-v1`、`silent-reply-v1`。
-- `state.health[side].supportsImages = true | false | "unknown"`，`imageMode="file-tools"`。没有声明、未绑定或更换原生会话时为unknown；unknown和false都不能作为可发送图片的目标。
+- `state.health[side].supportsImages = true | false | "unknown"`，`imageMode="file-tools"`。能力以第16节为准：没有声明时为unknown，可带待确认提示走文件路径投递；false才阻止带图发送。更换原生会话不借用旧会话声明，但相同会话自身的已验证声明保留。
 - `POST /api/capabilities/image {side,sessionId,supportsImages:true|false}` 仅Bearer允许，校验当前侧与绑定会话，保存checkedAt。该声明必须由对应Agent在实际调用图像工具成功后作出；它是当前会话的能力声明，不是服务器自动检查了模型的视觉能力。正式端到端验收还需两端各自说出测试图片内容。
 - `scripts/media-preview.mjs` 提供4327模拟实例、两张独立PNG及三个话题，数据在 `data-dev/media-preview/`。该实例的能力true是明确标注的mock夹具，不代表正式会话已核验。预览不启动投递循环、不连接原生适配器。
 
@@ -338,3 +338,14 @@ M1/M3/M4/M5 沿用已确认实现；M2 双方同意不按超时自动判空闲�
 - “新建后打开绑定面板”或“新建时自动创建一对会话”的产品选择仍待用户决定；本接口不自动创建原生会话。前端可显式传 `reuseBindings:false` 兼容切换前的旧进程。
 
 确认：Codex / DeepSeek，提案 `topic-binding-v2`。
+
+## 16. 认证时间边界与图片能力记录（health-image-v3）
+
+- DSH 浏览器会话凭据以当前时间提前2秒签发，保留原有HMAC、authority和一小时有效期，避免同机进程之间的小幅时钟差触发401。真实对照中实时签发12/12返回401、提前签发12/12成功；修正后30次连续目录读取（含发现共31个HTTP请求）无401。显式认证拒绝仍最多重发现/重试一次；传输结果未知的prompt不重发。健康状态以最近读取结果为准，不能用去重日志的末条时间推断成功。
+- `image_capabilities`以`(side,session_id)`为主键保存实际声明。首次迁移从旧全局配置和各话题缓存按声明内的sessionId恢复记录，取较新记录，同时间矛盾时false优先；不改变原话题缓存，不根据所在话题猜归属。迁移幂等，后续不会用旧缓存覆盖新声明。
+- `POST /api/capabilities/image`保持仅Bearer可写，仍必须匹配该话题当前绑定的side/sessionId；声明原子更新会话记录及话题缓存。同一会话重复保存、离开再绑定或换到其他话题后仍保留记录；新sessionId为unknown，不借用旧声明。原有1:1占用检查不变。
+- 三态：true表示已声明可读；false表示明确不支持，阻止带图发送、手动转发及出队；unknown表示待确认，前端提示后可通过既有共享本地文件路径投递，不声称接收端已读图。无论声明为何值，都校验图片ID、内容完整性、绑定和鉴权；读图失败必须明确回复失败，不能凭路径猜测。
+- 发送、手动转发和附件读取完成后的最终出队检查均遵循上述三态；若附件校验等待期间被声明为false，不会继续发送。投递成功不自动把unknown改为true；实际成功读图后由该原生会话自己声明，CLI/技能负责简化此步骤。
+- 服务特性：`image-capability-registry-v1`（会话级持久化）与`image-file-tools-v2`（unknown允许文件路径投递）。旧进程未切换前仍可能拒绝unknown，前端应保留草稿和失败说明。
+
+确认：Codex / DeepSeek，提案 `health-image-v3`。
