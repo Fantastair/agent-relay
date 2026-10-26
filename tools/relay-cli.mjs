@@ -91,6 +91,24 @@ function sideOf(value) {
   throw new Error('请用 --as codex 或 --as deepseek 指定自己');
 }
 
+async function resolveRoom(arg, {required = false} = {}) {
+  const st = await api('/api/state');
+  const rooms = st.rooms || [];
+  const live = rooms.filter(r => !r.archived);
+  if (!arg) {
+    if (required && live.length > 1) {
+      throw new Error('有多个话题，请用 --room 指定（话题 ID 或唯一标题）：' + live.map(r => r.title + '=' + r.id.slice(0, 8)).join(' · '));
+    }
+    return {st, room: rooms.find(r => r.id === st.roomId) || live[0] || rooms[0] || null};
+  }
+  const byId = rooms.find(r => r.id === arg || r.id.startsWith(arg));
+  if (byId) return {st, room: byId};
+  const byTitle = rooms.filter(r => r.title === arg);
+  if (byTitle.length === 1) return {st, room: byTitle[0]};
+  if (byTitle.length > 1) throw new Error('有多个同名话题，请用 ID：' + byTitle.map(r => r.id).join('，'));
+  throw new Error('找不到话题：' + arg);
+}
+
 /* ---------------- status ---------------- */
 
 async function status(json) {
@@ -101,7 +119,7 @@ async function status(json) {
   const active = (st.deliveries || []).filter(d => !['completed', 'cancelled'].includes(d.status));
 
   if (json) {
-    console.log(JSON.stringify({settings, health, last, active}, null, 2));
+    console.log(JSON.stringify({settings, health, last, active, concurrency: st.concurrency, rooms: st.rooms}, null, 2));
     return;
   }
   console.log('中转台 ' + (await baseUrl()));
@@ -196,12 +214,19 @@ async function inbox() {
     return;
   }
 
+  let targetRoom = null;
+  if (!all) {
+    const resolved = await resolveRoom(roomArg, {required: true});
+    targetRoom = resolved.room;
+    if (!targetRoom) throw new Error('没有可用话题');
+  }
+
   // 先探一次，拿到真实活动房间；游标按 roomId 存，切换活动房间不会复用。
   const probeQuery = new URLSearchParams({as: side, limit: '1'});
   if (all) probeQuery.set('all', '1');
-  if (roomArg) probeQuery.set('roomId', roomArg);
+  else probeQuery.set('roomId', targetRoom.id);
   const probe = await api('/api/inbox?' + probeQuery);
-  const roomKey = all ? 'all' : (roomArg || probe.roomId || 'unknown');
+  const roomKey = all ? 'all' : targetRoom.id;
 
   const stored = await loadInboxCursor(side, roomKey);
   let after;
@@ -221,7 +246,7 @@ async function inbox() {
   while (guard++ < 25) {
     const q = new URLSearchParams({as: side, after: String(cursor), limit: '200'});
     if (all) q.set('all', '1');
-    else if (roomArg) q.set('roomId', roomArg);
+    else q.set('roomId', targetRoom.id);
     page = await api('/api/inbox?' + q);
     out.push(...(page.messages || []));
     if (!page.hasMore) { cursor = page.nextCursor ?? cursor; break; }
@@ -288,12 +313,8 @@ async function send() {
 
   let roomId = null;
   const roomArg = typeof flag('room') === 'string' ? flag('room') : null;
-  if (roomArg) {
-    const st = await api('/api/state');
-    const room = (st.rooms || []).find(r => r.id === roomArg || r.title === roomArg);
-    if (!room) throw new Error('找不到话题：' + roomArg);
-    roomId = room.id;
-  }
+  const {room} = await resolveRoom(roomArg, {required: true});
+  if (room) roomId = room.id;
 
   const feats = await features();
   if (!feats.has('message-attribution-v1')) {
@@ -454,11 +475,12 @@ async function mail() {
 
 async function ready() {
   const side = sideOf(flag('as'));
-  const st = await api('/api/state');
+  const {st, room} = await resolveRoom(typeof flag('room') === 'string' ? flag('room') : null, {required: true});
   const sessionId = (typeof flag('session') === 'string' && flag('session')) || st.settings?.[side + 'Id'];
   const version = (typeof flag('version') === 'string' && flag('version')) || '1.0.0';
   if (!sessionId) throw new Error('缺少会话 ID：用 --session 指定，或先绑定');
-  const res = await api('/api/protocol/ready', {side, sessionId, version});
+  if (!room) throw new Error('缺少话题 ID：用 --room 指定');
+  const res = await api('/api/protocol/ready', {side, sessionId, version, roomId: room.id});
   console.log(JSON.stringify(res));
 }
 

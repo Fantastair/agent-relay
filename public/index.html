@@ -95,9 +95,9 @@
     </div>
     <div class="panel">
       <label class="field">并行运行上限
-        <select id="concurrency-limit"><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="6">6</option><option value="8">8</option></select>
+        <input id="concurrency-limit" type="number" min="1" step="1" inputmode="numeric" value="2">
       </label>
-      <p class="aside-note">超出上限的话题排队等待；正在运行的原生轮次不会被打断。</p>
+      <p class="aside-note">任意正整数；超出上限的话题排队等待，正在运行的原生轮次不会被打断。</p>
     </div>
     <div class="panel">
       <div class="panel-title">其他运行中的话题</div>

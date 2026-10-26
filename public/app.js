@@ -32,6 +32,8 @@ const S = {
   activeRoomId: null,
   sending: false,
   attachments: [],
+  attachmentStore: {},
+  scrollByRoom: {},
   quota: null,
   polling: false,
   signature: '',
@@ -501,25 +503,30 @@ function roomItem(room) {
 
   if (!S.synthetic) {
     const tools = el('div', 'room-tools');
+    const busy = (room.queueLength || 0) > 0 || ['running', 'waiting'].includes(room.runState);
     const rename = el('button', 'icon-btn', '✎');
     rename.title = '重命名';
     rename.setAttribute('aria-label', '重命名话题');
     rename.onclick = (e) => { e.stopPropagation(); renameRoom(room); };
     const arch = el('button', 'icon-btn', room.archived ? '⟲' : '⌫');
-    arch.title = room.archived ? '取消归档' : room.id === S.activeRoomId ? '当前投递房间不能归档' : '归档';
+    arch.title = room.archived ? '取消归档' : busy ? '该话题仍有未处理投递，暂不能归档' : '归档';
     arch.setAttribute('aria-label', arch.title);
-    arch.disabled = !room.archived && room.id === S.activeRoomId;
+    arch.disabled = !room.archived && busy;
     arch.onclick = (e) => { e.stopPropagation(); toggleArchive(room); };
     const del = el('button', 'icon-btn room-delete', '✕');
-    del.title = room.id === S.activeRoomId ? '当前投递话题不能删除' : '删除话题';
+    del.title = busy ? '该话题仍有未处理投递，不能删除' : '删除话题';
     del.setAttribute('aria-label', del.title);
-    del.disabled = room.id === S.activeRoomId;
+    del.disabled = busy;
     del.onclick = (e) => { e.stopPropagation(); askDeleteRoom(room); };
     const pause = el('button', 'icon-btn', room.paused ? '▶' : '‖');
     pause.title = room.paused ? '恢复此话题' : '暂停此话题';
     pause.setAttribute('aria-label', pause.title);
     pause.onclick = (e) => { e.stopPropagation(); toggleRoomPause(room); };
-    tools.append(rename, pause, arch, del);
+    const independent = el('button', 'icon-btn', '⇄');
+    independent.title = '为该话题创建独立会话';
+    independent.setAttribute('aria-label', independent.title);
+    independent.onclick = (e) => { e.stopPropagation(); useIndependentSession(room); };
+    tools.append(rename, pause, independent, arch, del);
     item.append(tools);
   }
 
@@ -890,12 +897,18 @@ async function refresh() {
 async function selectRoom(roomId) {
   if (roomId === S.roomId) return;
   saveDraft();
+  if (S.roomId) {
+    S.attachmentStore[S.roomId] = S.attachments;
+    S.scrollByRoom[S.roomId] = $('timeline').scrollTop;
+  }
   const previous = S.roomId;
   S.roomId = roomId;
   S.expanded.clear();
   S.signature = '';
   markRead(roomId);
   closeDrawers();
+  S.attachments = S.attachmentStore[roomId] || [];
+  renderAttachments();
   try {
     if (!S.synthetic) await api('rooms/select', {roomId});
   } catch (e) {
@@ -905,6 +918,10 @@ async function selectRoom(roomId) {
   }
   restoreDraft();
   await refresh();
+  const y = S.scrollByRoom[S.roomId];
+  const view = $('timeline');
+  if (typeof y === 'number') view.scrollTop = y;
+  else view.scrollTop = view.scrollHeight;
 }
 
 function draftKey(roomId) { return 'relay.draft.' + roomId; }
@@ -954,8 +971,9 @@ function toggleArchive(room) {  void act(async () => {
 let pendingDelete = null;
 
 function askDeleteRoom(room) {
-  if (room.id === S.activeRoomId) {
-    toast('当前投递话题不能删除，请先切换到其他话题');
+  const busy = (room.queueLength || 0) > 0 || ['running', 'waiting'].includes(room.runState);
+  if (busy) {
+    toast('该话题仍有未处理投递，请先完成或取消');
     return;
   }
   pendingDelete = room;
@@ -1198,15 +1216,19 @@ $('composer').addEventListener('submit', (e) => {
     }
     const target = $('target').value;
     const targets = target === 'both' ? ['codex', 'deepseek'] : [target];
+    const sendRoomId = S.roomId;
     $('send').disabled = true;
     S.sending = true;
     try {
-      await api('message', {text, targets, roomId: S.roomId, imageIds});
-      input.value = '';
-      try { localStorage.removeItem(draftKey(S.roomId)); } catch {}
-      clearAttachments();
+      await api('message', {text, targets, roomId: sendRoomId, imageIds});
+      try { localStorage.removeItem(draftKey(sendRoomId)); } catch {}
+      delete S.attachmentStore[sendRoomId];
+      if (S.roomId === sendRoomId) {
+        input.value = '';
+        clearAttachments();
+      }
       await refresh();
-      scrollBottom();
+      if (S.roomId === sendRoomId) scrollBottom();
       toast(targets.length === 2 ? '已保存，分别加入两边的队列' : '已加入 ' + NAMES[targets[0]] + ' 的队列');
     } finally {
       S.sending = false;
@@ -1266,7 +1288,13 @@ $('pause-all').addEventListener('click', () => void act(async () => {
 }));
 
 $('concurrency-limit').addEventListener('change', () => void act(async () => {
-  await api('scheduler', {limit: Number($('concurrency-limit').value)});
+  const raw = Number($('concurrency-limit').value);
+  if (!Number.isSafeInteger(raw) || raw < 1) {
+    toast('并发上限必须是正整数');
+    $('concurrency-limit').value = String(S.concurrency?.limit ?? 2);
+    return;
+  }
+  await api('scheduler', {limit: raw});
   await refresh();
 }));
 
@@ -1406,15 +1434,15 @@ for (const side of ['codex', 'deepseek']) {
 
 $('bind-pair').addEventListener('click', () => void act(async () => {
   $('bind-pair').disabled = true;
+  const targetRoomId = S.roomId;
   try {
     const codexId = $('codex-id').value.trim() || $('codex-session').value;
     const deepseekId = $('deepseek-id').value.trim() || $('deepseek-session').value;
-    await api('bind-pair', {codexId, deepseekId});
-    S.roomId = null;
+    await api('bind-pair', {roomId: targetRoomId, codexId, deepseekId});
     S.signature = '';
     S.expanded.clear();
     await refresh();
-    $('setup-status').textContent = '指定的两个会话已绑定。点击「开始投递」后发送消息；旧历史不会重新转发。';
+    $('setup-status').textContent = '已为「' + (currentRoom()?.title || '当前话题') + '绑定新会话；该话题投递保持暂停，确认后点「恢复此话题」。';
   } catch (e) {
     $('setup-status').textContent = e.message;
     throw e;
@@ -1425,15 +1453,15 @@ $('bind-pair').addEventListener('click', () => void act(async () => {
 
 $('provision').addEventListener('click', () => void act(async () => {
   $('provision').disabled = true;
+  const targetRoomId = S.roomId;
   $('setup-status').textContent = '正在创建并初始化专用会话，请保持两边应用运行…';
   try {
-    await api('provision', {workspaceId: $('workspace').value});
-    S.roomId = null;
+    await api('provision', {roomId: targetRoomId, workspaceId: $('workspace').value});
     S.signature = '';
     S.expanded.clear();
-    $('setup-status').textContent = '两边专用会话已连接。关闭设置后点击「开始投递」。';
+    $('setup-status').textContent = '已为「' + (currentRoom()?.title || '当前话题') + '创建独立会话。';
     await refresh();
-    toast('两个专用会话已就绪');
+    toast('该话题的独立会话已就绪');
   } catch (e) {
     $('setup-status').textContent = e.message;
     throw e;
@@ -1441,6 +1469,20 @@ $('provision').addEventListener('click', () => void act(async () => {
     $('provision').disabled = false;
   }
 }));
+
+function useIndependentSession(room) {
+  if (!confirm('为「' + (room.title || '此话题') + '」创建一对新的专用会话？\n\n使用当前工作区；创建后该话题投递保持暂停。')) return;
+  void act(async () => {
+    toast('正在创建专用会话…');
+    const res = await api('provision', {roomId: room.id, workspaceId: S.state?.settings?.workspaceId || ''});
+    await refresh();
+    if (res?.roomId || res?.room?.id) {
+      const id = res.roomId || res.room.id;
+      if (id !== S.roomId) await selectRoom(id);
+    }
+    toast('已为「' + (room.title || '此话题') + '」创建独立会话');
+  });
+}
 
 /* ---------------- boot ---------------- */
 
