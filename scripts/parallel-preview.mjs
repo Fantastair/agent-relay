@@ -7,7 +7,8 @@ const root=fileURLToPath(new URL('../',import.meta.url)),sessions=new Map();
 const adapters=Object.fromEntries(['codex','deepseek'].map(side=>[side,{
   async snapshot(sessionId){const turns=sessions.get(sessionId)||[];for(const turn of turns)if(turn.status==='inProgress'&&Date.now()>=turn.finishAt){turn.status='completed';turn.outputs=[{id:turn.id+'-out',text:'模拟 '+side+' 已完成：'+sessionId+'\n[relay-stop]'}];}return {id:sessionId,title:'模拟 '+sessionId,state:turns.some(t=>t.status==='inProgress')?'running':'idle',turns};},
   async send(sessionId,text,requestId){const turns=sessions.get(sessionId)||[];turns.push({id:requestId,status:'inProgress',inputs:[{id:requestId+'-in',kind:'user',text,requestId}],outputs:[],finishAt:Date.now()+12000});sessions.set(sessionId,turns);return {nativeTurnId:requestId,requestId};},
-  async list(){return [];},async projects(){return {projects:[]};},async workspaces(){return [];},
+  async list(){return Array.from({length:8},(_,index)=>side==='codex'?{id:'mock-c-'+index,title:'模拟 Codex '+index,status:'idle'}:{sessionId:'mock-d-'+index,projections:{values:{title:'模拟 DeepSeek '+index}}});},
+  async projects(){return {projects:[]};},async workspaces(){return [{workspaceId:'mock-workspace',title:'模拟工作区',path:'D:/mock-workspace'}];},
 }]));
 const service=await makeService({dataDir:path.join(root,'data-dev','parallel-preview'),adapters});
 if(!service.store.get('parallelPreviewSeeded',false)){
