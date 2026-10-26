@@ -134,7 +134,11 @@ async function status(json) {
     const label = {idle: '空闲', queued: '排队', running: '运行', waiting: '待处理', paused: '暂停', unbound: '未绑定'};
     console.log('话题 ' + st.rooms.filter(r => !r.archived).map(r => {
       const state = label[r.runState] || r.runState || '空闲';
-      return r.title + ' ' + state + (r.queueLength ? '(' + r.queueLength + ')' : '');
+      const bind = r.bindingStatus && r.bindingStatus !== 'ready'
+        ? (r.bindingStatus === 'unbound' ? '未绑定' : '绑定冲突')
+        : '';
+      const parts = bind && bind !== state ? [state, bind] : [state];
+      return r.title + ' ' + parts.join('/') + (r.queueLength ? '(' + r.queueLength + ')' : '');
     }).join(' · '));
   }
   for (const side of ['codex', 'deepseek']) {

@@ -68,7 +68,13 @@ async function api(path, body) {
   });
   let payload = {};
   try { payload = await r.json(); } catch {}
-  if (!r.ok) throw new Error(payload.error || '请求失败（' + r.status + '）');
+  if (!r.ok) {
+    const error = new Error(payload.error || '请求失败（' + r.status + '）');
+    error.status = r.status;
+    error.code = payload.code;
+    error.conflict = payload.conflict || null;
+    throw error;
+  }
   return payload;
 }
 
@@ -403,7 +409,12 @@ function renderChrome() {
   const banner = $('banner');
   if (!connected && !S.synthetic) {
     banner.hidden = false;
-    banner.textContent = '这个话题还没有绑定原生会话。打开「连接与设置」指定，或使用「独立会话」。';
+    banner.textContent = room?.bindingStatus === 'conflict'
+      ? '此话题的原生会话与其他话题冲突（历史共用绑定）。请在「连接与设置」中为它换绑一对独立会话。'
+      : '这个话题还没有绑定原生会话。请在「连接与设置」里为它选择或新建一对。';
+  } else if (room?.bindingStatus === 'conflict') {
+    banner.hidden = false;
+    banner.textContent = '此话题的原生会话与其他话题冲突（历史共用绑定），已停止新增投递；请换绑一对独立会话。';
   } else if (pausedAll) {
     banner.hidden = false;
     banner.textContent = '已全部暂停。各话题自己的暂停状态保留；恢复后按各自状态继续。';
@@ -1006,7 +1017,7 @@ function closeDeleteDialog() {
 
 async function newTopic() {  void act(async () => {
     const sourceRoomId = S.roomId;
-    const res = await api('rooms', {roomId: sourceRoomId});
+    const res = await api('rooms', {roomId: sourceRoomId, reuseBindings: false});
     if (res?.room?.id) {
       if (res.warning) toast(res.warning);
       closeDrawers();
@@ -1096,6 +1107,34 @@ function applyCatalog(cat) {
     // 部分结果阶段某一侧还没返回时，保留已有选项，避免把用户的选择清空。
     if (!rows.length && selected) continue;
     fillSelect(id, rows, selected);
+  }
+  markOccupied('codex-session', 'codex');
+  markOccupied('deepseek-session', 'deepseek');
+}
+
+function occupancy(side) {
+  const map = new Map();
+  for (const room of S.rooms) {
+    if (room.id === S.roomId) continue; // 当前话题自己的绑定不算占用
+    const id = side === 'codex' ? room.codexId : room.deepseekId;
+    if (!id) continue;
+    if (!map.has(id)) map.set(id, []);
+    map.get(id).push(room.title || room.id.slice(0, 8));
+  }
+  return map;
+}
+
+function markOccupied(selectId, side) {
+  const select = $(selectId);
+  if (!select) return;
+  const occupied = occupancy(side);
+  for (const option of select.options) {
+    if (!option.value) continue;
+    const owners = occupied.get(option.value);
+    if (owners && owners.length) {
+      option.disabled = true;
+      option.textContent += '（已被「' + owners.join('」「') + '」占用）';
+    }
   }
 }
 
@@ -1225,6 +1264,13 @@ $('composer').addEventListener('submit', (e) => {
     }
     if (S.attachments.some(a => a.status === 'error')) {
       toast('有图片上传失败，请移除后重试');
+      return;
+    }
+    const sendTarget = currentRoom();
+    if (sendTarget && sendTarget.bindingStatus && sendTarget.bindingStatus !== 'ready') {
+      toast(sendTarget.bindingStatus === 'unbound'
+        ? '此话题还没有绑定一对会话，请先在「连接与设置」里绑定'
+        : '此话题的会话与其他话题冲突，请先换绑');
       return;
     }
     if (imageIds.length) {
@@ -1474,9 +1520,14 @@ $('bind-pair').addEventListener('click', () => void act(async () => {
     S.signature = '';
     S.expanded.clear();
     await refresh();
-    $('setup-status').textContent = '已为「' + (currentRoom()?.title || '当前话题') + '绑定新会话；该话题投递保持暂停，确认后点「恢复此话题」。';
+    $('setup-status').textContent = '已为「' + (currentRoom()?.title || '当前话题') + '绑定一对会话；该话题投递保持暂停，确认后点「恢复此话题」。';
   } catch (e) {
-    $('setup-status').textContent = e.message;
+    if (e.conflict) {
+      const sideName = e.conflict.side === 'codex' ? 'Codex' : 'DeepSeek';
+      $('setup-status').textContent = sideName + ' 会话已被话题「' + (e.conflict.title || e.conflict.roomId) + '」占用，请换一个会话。';
+    } else {
+      $('setup-status').textContent = e.message;
+    }
     throw e;
   } finally {
     $('bind-pair').disabled = false;
