@@ -289,8 +289,9 @@ function applyState(st) {
   S.synthetic = !hasRooms;
   S.rooms = hasRooms ? st.rooms : synthRooms(st);
 
-  const preferred = S.roomId || st.settings?.roomId;
-  S.roomId = S.rooms.some(r => r.id === preferred) ? preferred : S.rooms[0].id;
+  // 服务端返回的 roomId 是权威值：话题被别处删除时，不能回退到列表第一项。
+  const candidates = [S.roomId, st.roomId, st.settings?.roomId, st.activeRoomId];
+  S.roomId = candidates.find(id => id && S.rooms.some(r => r.id === id)) || S.rooms[0].id;
 
   S.messages = (st.messages || []).filter(m => !m.roomId || m.roomId === S.roomId);
   S.deliveries = (st.deliveries || []).filter(d => !d.roomId || d.roomId === S.roomId);
@@ -453,7 +454,10 @@ function roomItem(room) {
 
   const open = () => { if (room.id !== S.roomId) selectRoom(room.id); };
   item.onclick = open;
-  item.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } };
+  item.onkeydown = (e) => {
+    if (e.target !== item) return;
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); }
+  };
   return item;
 }
 
