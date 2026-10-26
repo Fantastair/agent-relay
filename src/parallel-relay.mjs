@@ -251,7 +251,8 @@ export class ParallelRelay{
   imageCapability(side,roomId=this.defaultRoom()){return this.engine(roomId).imageCapability(side);}
   roomHealth(room){return Object.fromEntries(SIDES.map(side=>{
     const engine=this.engines.get(room.id),sessionId=room[bindingKey(side)],cached=this.sessionHealth.get(resourceKey(side,sessionId));
-    return [side,{...(cached||engine?.health[side]||{state:sessionId?'unknown':'unbound'}),...this.imageCapability(side,room.id)}];
+    const {checkedAt:imageCheckedAt,...capability}=this.imageCapability(side,room.id);
+    return [side,{...(cached||engine?.health[side]||{state:sessionId?'unknown':'unbound'}),...capability,...(imageCheckedAt!==undefined?{imageCheckedAt}:{})}];
   }));}
   describe(room){
     const options=this.store.roomOptions(room.id),health=this.roomHealth(room),queued=SIDES.flatMap(side=>this.store.jobs(side,['queued'],room.id)),flight=this.flights(room.id);

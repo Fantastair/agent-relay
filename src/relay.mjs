@@ -166,5 +166,5 @@ export class Relay{
     }catch(e){const text=safeError(e);const now=Date.now();const last=this.connLogAt[side];if(this.health[side]?.error!==text&&(!last||last.text!==text||now-last.t>30000)){this.store.log('connection',`${side==='codex'?'Codex':'DeepSeek'}：${text}`);this.connLogAt[side]={text,t:now};}this.health[side]={ok:false,state:'offline',error:text,checkedAt:Date.now()};this.notify();}
     finally{this.busy[side]=false;}
   }
-  state(roomId){return {...this.store.state(roomId),health:Object.fromEntries(SIDES.map(side=>[side,{...this.health[side],...this.imageCapability(side)}])),protocol:this.protocolState()};}
+  state(roomId){return {...this.store.state(roomId),health:Object.fromEntries(SIDES.map(side=>{const {checkedAt:imageCheckedAt,...capability}=this.imageCapability(side);return [side,{...this.health[side],...capability,...(imageCheckedAt!==undefined?{imageCheckedAt}:{})}];})),protocol:this.protocolState()};}
 }

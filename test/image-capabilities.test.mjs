@@ -5,6 +5,7 @@ import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {Store} from '../src/store.mjs';
 import {ParallelRelay} from '../src/parallel-relay.mjs';
+import {Relay} from '../src/relay.mjs';
 const adapters=Object.fromEntries(['codex','deepseek'].map(side=>[side,{async snapshot(id){return {id,state:'idle',turns:[]};}}]));
 
 test('migration recovers session declarations from global and misplaced room caches without copying them to different sessions',async()=>{
@@ -48,4 +49,18 @@ test('provider identity and matching bound session are both required to declare 
     assert.throws(()=>relay.confirmImageCapability({roomId,side:'codex',sessionId:'unbound',supportsImages:true}),/当前绑定/);
     assert.equal(store.imageCapability('codex','unbound'),null);
   }finally{store.close();}
+});
+
+test('image verification time cannot overwrite live health observation time',async()=>{
+  for(const Engine of [Relay,ParallelRelay]){
+    const store=new Store(':memory:');try{
+      store.set('codexId','c');store.set('deepseekId','d');store.rememberImageCapability('codex',{sessionId:'c',supportsImages:true,checkedAt:1});
+      let offline=false;const native={async snapshot(id){if(offline)throw new Error('connection lost');return {id,state:'idle',turns:[]};}};
+      const relay=new Engine(store,{codex:native,deepseek:native}),roomId=store.activeRoomId(),started=Date.now();
+      await relay.tick('codex');let health=relay.state(roomId).health.codex;
+      assert.equal(health.imageCheckedAt,1);assert(health.checkedAt>=started);assert.equal(health.ok,true);
+      offline=true;await relay.tick('codex');health=relay.state(roomId).health.codex;
+      assert.equal(health.ok,false);assert.equal(health.supportsImages,true);assert.equal(health.imageCheckedAt,1);assert(health.checkedAt>=started);
+    }finally{store.close();}
+  }
 });
