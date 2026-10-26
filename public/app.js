@@ -912,9 +912,9 @@ function stashContext() {
   S.scrollByRoom[S.roomId] = $('timeline').scrollTop;
 }
 
-async function enterRoom(roomId, {refreshFirst = true} = {}) {
+async function enterRoom(roomId, {refreshFirst = true, skipStash = false} = {}) {
   if (roomId === S.roomId) return;
-  stashContext();
+  if (!skipStash) stashContext();
   S.roomId = roomId;
   S.expanded.clear();
   S.signature = '';
@@ -1409,7 +1409,9 @@ $('delete-confirm').addEventListener('click', () => void act(async () => {
         || S.rooms.find(r => r.id !== room.id)
         || null;
       if (next) {
-        await enterRoom(next.id);
+        await enterRoom(next.id, {skipStash: true});
+        try { localStorage.removeItem(draftKey(room.id)); } catch {}
+        delete S.attachmentStore[room.id];
       } else {
         S.signature = '';
         await refresh();
