@@ -1164,8 +1164,20 @@ function imageTargets() {
   return target === 'both' ? ['codex', 'deepseek'] : [target];
 }
 
+function capabilityOf(side) {
+  const health = currentRoom()?.health?.[side] || S.state?.health?.[side] || {};
+  return health.supportsImages;
+}
+
 function unsupportedImageTargets() {
-  return imageTargets().filter(side => S.state?.health?.[side]?.supportsImages !== true);
+  return imageTargets().filter(side => capabilityOf(side) === false);
+}
+
+function pendingImageTargets() {
+  return imageTargets().filter(side => {
+    const state = capabilityOf(side);
+    return state !== true && state !== false;
+  });
 }
 
 async function compressImage(file) {
@@ -1212,8 +1224,11 @@ function renderAttachments() {
     frag.append(cell);
   }
   const unsupported = unsupportedImageTargets();
+  const pending = pendingImageTargets();
   if (unsupported.length) {
-    frag.append(el('div', 'attach-warn', '此会话尚未声明图片能力（' + unsupported.map(s => NAMES[s]).join('、') + '），发送会被拒绝'));
+    frag.append(el('div', 'attach-block', '不支持看图（' + unsupported.map(s => NAMES[s]).join('、') + '）：带图发送会被拒绝，请改用文字。'));
+  } else if (pending.length) {
+    frag.append(el('div', 'attach-pending', '能力待确认（' + pending.map(s => NAMES[s]).join('、') + '）：可以先发送；对方实际读图后需声明一次，之后不再提示。'));
   }
   box.replaceChildren(frag);
 }

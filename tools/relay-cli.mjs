@@ -488,6 +488,18 @@ async function ready() {
   console.log(JSON.stringify(res));
 }
 
+async function capability() {
+  const side = sideOf(flag('as'));
+  const {room} = await resolveRoom(typeof flag('room') === 'string' ? flag('room') : null, {required: true});
+  if (!room) throw new Error('缺少话题 ID：用 --room 指定');
+  const sessionId = (typeof flag('session') === 'string' && flag('session')) || room?.[side === 'codex' ? 'codexId' : 'deepseekId'];
+  if (!sessionId) throw new Error('该话题尚未绑定 ' + side + '；绑定后再声明');
+  const raw = flag('supports');
+  const supportsImages = raw === undefined ? true : raw === 'true' || raw === '1';
+  const res = await api('/api/capabilities/image', {roomId: room.id, side, sessionId, supportsImages});
+  console.log('已声明 ' + side + '（会话 ' + sessionId + '）图片能力 = ' + supportsImages + (res?.imageMode ? ' · ' + res.imageMode : ''));
+}
+
 /* ---------------- main ---------------- */
 
 const HELP = `relay-cli — 中转台补充通道
@@ -497,6 +509,7 @@ const HELP = `relay-cli — 中转台补充通道
   send --as <side> --to <peer> "文本"   需要新后端（message-attribution-v1）
   quota [--json]              查询 DeepSeek / Codex 额度
   ready --as <side> [--version 1.0.0]   声明已加载协作协议版本
+  capability --as <side> --room <话题> [--supports true|false]   声明图片能力
   mail --subject "…" --text "…" [--to a@b.com]
 
 side ∈ codex | deepseek
@@ -509,6 +522,7 @@ try {
   else if (cmd === 'send') await send();
   else if (cmd === 'quota') await quota();
   else if (cmd === 'ready') await ready();
+else if (cmd === 'capability') await capability();
   else if (cmd === 'mail') await mail();
   else { console.error('未知命令：' + cmd); console.log(HELP); process.exitCode = 1; }
 } catch (e) {

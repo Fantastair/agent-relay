@@ -56,7 +56,7 @@ Content-Type: application/json
 
 积压消息支持批量投递：同侧同话题至少2条且已等待30秒，或至少4条立即合批；每批最多6条、总信封不超过100 KiB。原始消息仍独立记录，`state.batches` 提供成员和共享原生回执，delivery 关联 `batchId`。批次一旦形成便固定成员和文本，超时后等待回查。取消、重试、人工处理任一成员时都会作用于整批，界面必须明确提示。详见契约第10节。
 
-图片使用共享文件：`POST /api/image {dataUrl}` 上传PNG/JPEG/WebP，返回受认证保护的URL和本地路径；消息用 `imageIds:[]` 关联，最多4张。信封带路径，由对应Agent实际调用图像工具读取。每端 `health.supportsImages` 默认unknown；Agent实际读图核验后通过Bearer `POST /api/capabilities/image {side,sessionId,supportsImages:true}` 声明，未确认的端不能发送图片。更换会话后需重新确认。详见契约第11节。
+图片使用共享文件：`POST /api/image {dataUrl}` 上传PNG/JPEG/WebP，返回受认证保护的URL和本地路径；消息用 `imageIds:[]` 关联，最多4张。信封带路径，由对应Agent实际调用图像工具读取。每端 `health.supportsImages` 默认 `unknown`：**待确认仍可发送**，Agent实际读图核验后执行 `relay-cli capability --as <side> --room <话题>` 声明一次；只有明确 `false` 的端会被拒绝。声明按“模型侧 + 原生会话 ID”保存，同一会话换绑后保留，新会话不继承。详见契约第11节。
 
 无需可见回复时仅输出 `[relay-silent]`（兼容 `[relay-no-reply]`）；后端保留 `meta.silent` 控制记录供导出审计，时间线和收件箱不显示、不继续接力。有正文时保留正文并停止接力。
 

@@ -340,6 +340,8 @@ a{color:var(--blue)}
 .attachment.error{border-color:#e7c9c4}
 .attachment.error .state{background:rgba(178,58,47,.85)}
 .attach-warn{flex-basis:100%;font-size:11px;line-height:1.5;color:var(--amber);padding:2px 4px}
+.attach-pending{flex-basis:100%;font-size:11px;line-height:1.5;color:var(--amber);padding:2px 4px}
+.attach-block{flex-basis:100%;font-size:11px;line-height:1.5;color:var(--red);padding:2px 4px}
 .md-images{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
 .md-images a{display:block;width:96px;height:96px;border-radius:9px;overflow:hidden;border:1px solid var(--line-2)}
 .md-images img{width:100%;height:100%;object-fit:cover;display:block}
