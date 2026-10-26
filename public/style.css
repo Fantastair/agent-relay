@@ -606,3 +606,13 @@ dialog::backdrop{background:rgba(16,26,40,.42);backdrop-filter:blur(2px)}
   .rooms-archived summary:hover{background:#1a2330;color:var(--ink)}
   .conn-quota{color:#9dc0e8}
 }
+/* ---------- 多话题并行 ---------- */
+.room-item{gap:4px}
+.room-status{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:10.5px;color:var(--faint);line-height:1.4}
+.room-queue{color:var(--blue)}
+.room-shared{color:var(--amber)}
+.room-paused{color:var(--amber)}
+.other-room{display:flex;align-items:center;gap:7px;padding:5px 4px;border-radius:7px;cursor:pointer;font-size:11.5px}
+.other-room:hover{background:#f1f5fb}
+.other-room-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--ink)}
+.other-room-queue{color:var(--faint);font-size:10.5px}

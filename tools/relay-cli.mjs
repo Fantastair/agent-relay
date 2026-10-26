@@ -106,7 +106,19 @@ async function status(json) {
   }
   console.log('中转台 ' + (await baseUrl()));
   console.log('房间 ' + (st.rooms?.find(r => r.id === settings.roomId)?.title || '本地协作') + ' · ' + st.messages.length + ' 条消息');
-  console.log('投递 ' + (settings.paused ? '已暂停' : '进行中') + ' · 上限 ' + settings.maxTurns + ' · 模式 ' + settings.mode);
+  const gatePaused = st.concurrency ? st.concurrency.pausedAll : settings.paused;
+  console.log('投递 ' + (gatePaused ? '已暂停' : '进行中') + ' · 上限 ' + settings.maxTurns + ' · 模式 ' + settings.mode);
+  if (st.concurrency) {
+    const c = st.concurrency;
+    console.log(`并行 ${c.running}/${c.limit}${c.pausedAll ? ' · 总闸已暂停' : ''}`);
+  }
+  if (Array.isArray(st.rooms) && st.rooms.length) {
+    const label = {idle: '空闲', queued: '排队', running: '运行', waiting: '待处理', paused: '暂停', unbound: '未绑定'};
+    console.log('话题 ' + st.rooms.filter(r => !r.archived).map(r => {
+      const state = label[r.runState] || r.runState || '空闲';
+      return r.title + ' ' + state + (r.queueLength ? '(' + r.queueLength + ')' : '');
+    }).join(' · '));
+  }
   for (const side of ['codex', 'deepseek']) {
     const h = health[side] || {};
     const state = h.state || (settings[side + 'Id'] ? '未知' : '未绑定');
@@ -274,16 +286,25 @@ async function send() {
   const text = positional().join(' ').trim();
   if (!text) throw new Error('缺少消息内容');
 
+  let roomId = null;
+  const roomArg = typeof flag('room') === 'string' ? flag('room') : null;
+  if (roomArg) {
+    const st = await api('/api/state');
+    const room = (st.rooms || []).find(r => r.id === roomArg || r.title === roomArg);
+    if (!room) throw new Error('找不到话题：' + roomArg);
+    roomId = room.id;
+  }
+
   const feats = await features();
   if (!feats.has('message-attribution-v1')) {
     throw new Error('后端缺少 message-attribution-v1（多半还是旧进程），拒绝发送：否则 Agent 发言会被记成用户。--force 也不放行，等 4319 重启到新后端。');
   }
 
   const clientMessageId = 'cli-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
-  const res = await api('/api/message', {text, targets: [to], sender: side, origin: 'agent', clientMessageId});
+  const res = await api('/api/message', {text, targets: [to], sender: side, origin: 'agent', clientMessageId, ...(roomId ? {roomId} : {})});
   const got = res.message?.sender;
   if (got && got !== side) throw new Error('后端把来源记成了 ' + got + '，已停止；请核对队列里是否已入队。');
-  console.log('已入队 #' + (res.message?.id || '?').slice(0, 8) + ' → ' + NAMES[to] + '（来源 ' + side + '，' + clientMessageId + '）');
+  console.log('已入队 #' + (res.message?.id || '?').slice(0, 8) + ' → ' + NAMES[to] + (roomId ? '（话题 ' + roomId.slice(0, 8) + '）' : '') + '，来源 ' + side);
 }
 
 /* ---------------- quota ---------------- */

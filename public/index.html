@@ -40,9 +40,11 @@
         <p id="room-sub">一条消息，同时送达两个 Agent</p>
       </div>
       <div class="topbar-actions">
+        <span id="concurrency-chip" class="chip info" title="并行运行的话题数 / 上限">并行 0/2</span>
+        <button id="pause-all" class="btn ghost">全部暂停</button>
         <button id="activity-toggle" class="btn ghost only-narrow">进度</button>
         <button id="export" class="btn ghost">导出</button>
-        <button id="pause" class="btn primary">开始投递</button>
+        <button id="pause" class="btn primary">暂停此话题</button>
       </div>
     </header>
 
@@ -90,6 +92,16 @@
         <select id="budget"><option value="2">2 次</option><option value="4">4 次</option><option value="6">6 次</option><option value="10">10 次</option><option value="20">20 次</option></select>
       </label>
       <p class="aside-note">达到上限、Agent 明确结束或等待你回答时，自动协作停止。</p>
+    </div>
+    <div class="panel">
+      <label class="field">并行运行上限
+        <select id="concurrency-limit"><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="6">6</option><option value="8">8</option></select>
+      </label>
+      <p class="aside-note">超出上限的话题排队等待；正在运行的原生轮次不会被打断。</p>
+    </div>
+    <div class="panel">
+      <div class="panel-title">其他运行中的话题</div>
+      <div id="other-rooms"></div>
     </div>
     <div class="panel">
       <div class="panel-title">投递队列</div>

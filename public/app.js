@@ -11,6 +11,14 @@ const STATUS_LABEL = {
 const STATE_LABEL = {
   idle: '空闲', running: '工作中', offline: '离线', unbound: '未绑定', notLoaded: '待恢复',
 };
+const RUN_STATE = {
+  idle: {label: '空闲', tone: ''},
+  queued: {label: '排队中', tone: 'info'},
+  running: {label: '运行中', tone: 'ok'},
+  waiting: {label: '待处理', tone: 'warn'},
+  paused: {label: '已暂停', tone: 'warn'},
+  unbound: {label: '未绑定', tone: 'bad'},
+};
 
 const S = {
   state: null,
@@ -297,6 +305,7 @@ function applyState(st) {
   S.deliveries = (st.deliveries || []).filter(d => !d.roomId || d.roomId === S.roomId);
   S.readOnly = !!st.readOnly;
   S.activeRoomId = st.activeRoomId || st.settings?.activeRoomId || st.settings?.roomId || S.rooms[0]?.id;
+  S.concurrency = st.concurrency || (st.settings ? {limit: 2, running: 0, pausedAll: !!st.settings.paused} : null);
 
   const sig = JSON.stringify([
     S.roomId,
@@ -325,46 +334,69 @@ function currentRoom() {
 function renderChrome() {
   const st = S.state;
   const room = currentRoom();
-  const connected = !!(st?.settings?.codexId && st?.settings?.deepseekId);
+  const concurrency = S.concurrency || {limit: 2, running: 0, pausedAll: false};
+  const pausedAll = !!concurrency.pausedAll;
+  const roomPaused = !!room?.paused;
+  const health = room?.health || st?.health || {};
+  const connected = !!(room?.codexId && room?.deepseekId);
 
   document.title = room ? room.title + ' · 中转台' : '中转台';
   $('room-title').textContent = room?.title || '本地协作';
   $('new-room').hidden = S.synthetic;
 
-  const health = st?.health || {};
-  const hc = ['codex', 'deepseek'].map(side => {
+  const sideText = ['codex', 'deepseek'].map(side => {
     const h = health[side] || {};
-    if (!st?.settings?.[side + 'Id']) return NAMES[side] + ' 未绑定';
+    if (!room?.[side + 'Id']) return NAMES[side] + ' 未绑定';
     if (h.state === 'running') return NAMES[side] + ' 工作中';
     if (h.state === 'offline') return NAMES[side] + ' 离线';
     return NAMES[side] + ' 就绪';
   });
-  $('room-sub').textContent = connected
-    ? S.messages.length + ' 条消息 · ' + hc.join(' · ')
-    : '一条消息，同时送达两个 Agent';
+  const runLabel = RUN_STATE[room?.runState]?.label || '空闲';
+  $('room-sub').textContent = S.messages.length + ' 条消息 · ' + runLabel + ' · ' + sideText.join(' · ');
 
-  const paused = !!st?.settings?.paused;
-  $('pause').textContent = paused ? '开始投递' : '暂停投递';
+  const chip = $('concurrency-chip');
+  if (chip) {
+    chip.textContent = '并行 ' + concurrency.running + '/' + concurrency.limit;
+    chip.hidden = S.synthetic;
+    chip.classList.toggle('warn', concurrency.running >= concurrency.limit);
+  }
+  const pauseAllBtn = $('pause-all');
+  if (pauseAllBtn) {
+    pauseAllBtn.textContent = pausedAll ? '恢复全部' : '全部暂停';
+    pauseAllBtn.hidden = S.synthetic;
+  }
 
-  const mode = st?.settings?.mode || 'auto';
+  $('pause').textContent = roomPaused ? '恢复此话题' : '暂停此话题';
+  $('pause').disabled = S.synthetic;
+
+  const mode = room?.mode || st?.settings?.mode || 'auto';
+  const maxTurns = room?.maxTurns ?? st?.settings?.maxTurns ?? 6;
   $('mode').value = mode;
-  $('budget').value = String(st?.settings?.maxTurns ?? 6);
+  $('budget').value = String(maxTurns);
   $('dialog-mode').value = mode;
-  $('dialog-budget').value = String(st?.settings?.maxTurns ?? 6);
+  $('dialog-budget').value = String(maxTurns);
+  if ($('concurrency-limit')) $('concurrency-limit').value = String(concurrency.limit);
 
-  $('compose-note').textContent = !connected
-    ? '先连接两个原生会话，再发送消息。'
-    : paused
-      ? '当前暂停投递：消息会保存并排队，点击「开始投递」后发出。'
-      : '默认同时发送，两边各自保存原生对话记录。';
+  $('compose-note').textContent = S.readOnly
+    ? '浏览历史话题：只读，发送前请先「继续此话题」。'
+    : !connected
+      ? '先连接两个原生会话，再发送消息。'
+      : pausedAll
+        ? '已全部暂停：消息会保存并排队，点「恢复全部」后发出。'
+        : roomPaused
+          ? '此话题已暂停：消息会保存并排队，点「恢复此话题」后发出。'
+          : '默认同时发送，两边各自保存原生对话记录。';
 
   const banner = $('banner');
-  if (!connected) {
+  if (!connected && !S.synthetic) {
     banner.hidden = false;
-    banner.textContent = '还没有连接两个原生会话。打开「连接与设置」指定会话，或新建一对专用会话。';
-  } else if (paused) {
+    banner.textContent = '这个话题还没有绑定原生会话。打开「连接与设置」指定，或使用「独立会话」。';
+  } else if (pausedAll) {
     banner.hidden = false;
-    banner.textContent = '投递已暂停。消息仍会保存和排队，已开始的原生任务继续执行。';
+    banner.textContent = '已全部暂停。各话题自己的暂停状态保留；恢复后按各自状态继续。';
+  } else if (roomPaused) {
+    banner.hidden = false;
+    banner.textContent = '此话题已暂停。消息仍会保存和排队，已开始的原生任务继续执行。';
   } else {
     banner.hidden = true;
   }
@@ -372,6 +404,28 @@ function renderChrome() {
   renderRooms();
   renderConnections();
   renderReadonly();
+  renderOtherRooms();
+}
+
+function renderOtherRooms() {
+  const box = $('other-rooms');
+  if (!box) return;
+  const others = S.rooms.filter(r => r.id !== S.roomId && !r.archived && (r.runState && r.runState !== 'idle' || (r.queueLength || 0) > 0));
+  if (!others.length) {
+    box.replaceChildren(el('p', 'no-jobs', '没有其他在运行的话题。'));
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  for (const r of others) {
+    const row = el('div', 'other-room');
+    row.append(el('span', 'other-room-name', r.title || '未命名话题'));
+    const st = RUN_STATE[r.runState] || RUN_STATE.idle;
+    row.append(el('span', 'chip ' + st.tone, st.label));
+    if (r.queueLength) row.append(el('span', 'other-room-queue', '队列 ' + r.queueLength));
+    row.onclick = () => void selectRoom(r.id);
+    frag.append(row);
+  }
+  box.replaceChildren(frag);
 }
 
 function renderReadonly() {
@@ -426,11 +480,24 @@ function roomItem(room) {
   meta.append(el('span', null, room.lastAt ? clock(room.lastAt) : '新'));
   meta.append(el('span', null, '·'));
   meta.append(el('span', null, (room.messageCount ?? 0) + ' 条'));
-  if (room.id === S.activeRoomId) meta.append(el('span', 'chip ok', '当前'));
   if (!room.archived && room.id !== S.roomId && room.lastAt && room.lastAt > (S.lastRead[room.id] || 0)) {
     meta.append(el('span', 'unread', '新'));
   }
   item.append(name, meta);
+
+  if (room.runState || room.queueLength) {
+    const status = el('span', 'room-status');
+    const run = RUN_STATE[room.runState] || RUN_STATE.idle;
+    status.append(el('span', 'chip ' + run.tone, run.label));
+    if (room.queueLength) status.append(el('span', 'room-queue', '队列 ' + room.queueLength));
+    if (Array.isArray(room.sharedWith) && room.sharedWith.length) {
+      const shared = el('span', 'room-shared', '共用会话 · 串行');
+      shared.title = '与「' + room.sharedWith.map(r => r.title).join('」「') + '」共用原生会话';
+      status.append(shared);
+    }
+    if (room.paused && room.runState !== 'paused') status.append(el('span', 'room-paused', '已暂停'));
+    item.append(status);
+  }
 
   if (!S.synthetic) {
     const tools = el('div', 'room-tools');
@@ -448,7 +515,11 @@ function roomItem(room) {
     del.setAttribute('aria-label', del.title);
     del.disabled = room.id === S.activeRoomId;
     del.onclick = (e) => { e.stopPropagation(); askDeleteRoom(room); };
-    tools.append(rename, arch, del);
+    const pause = el('button', 'icon-btn', room.paused ? '▶' : '‖');
+    pause.title = room.paused ? '恢复此话题' : '暂停此话题';
+    pause.setAttribute('aria-label', pause.title);
+    pause.onclick = (e) => { e.stopPropagation(); toggleRoomPause(room); };
+    tools.append(rename, pause, arch, del);
     item.append(tools);
   }
 
@@ -462,7 +533,7 @@ function roomItem(room) {
 }
 
 function renderConnections() {
-  const health = S.state?.health || {};
+  const health = currentRoom()?.health || S.state?.health || {};
   const box = $('connections');
   box.replaceChildren(...['codex', 'deepseek'].map(side => {
     const h = health[side] || {};
@@ -818,6 +889,7 @@ async function refresh() {
 
 async function selectRoom(roomId) {
   if (roomId === S.roomId) return;
+  saveDraft();
   const previous = S.roomId;
   S.roomId = roomId;
   S.expanded.clear();
@@ -831,7 +903,30 @@ async function selectRoom(roomId) {
     S.signature = '';
     toast(e.message);
   }
+  restoreDraft();
   await refresh();
+}
+
+function draftKey(roomId) { return 'relay.draft.' + roomId; }
+function saveDraft() {
+  if (!S.roomId) return;
+  try {
+    const value = $('message').value;
+    if (value) localStorage.setItem(draftKey(S.roomId), value);
+    else localStorage.removeItem(draftKey(S.roomId));
+  } catch {}
+}
+function restoreDraft() {
+  try {
+    $('message').value = S.roomId ? (localStorage.getItem(draftKey(S.roomId)) || '') : '';
+  } catch {}
+}
+
+function toggleRoomPause(room) {
+  void act(async () => {
+    await api('options', {roomId: room.id, paused: !room.paused});
+    await refresh();
+  });
 }
 
 function renameRoom(room) {
@@ -1108,6 +1203,7 @@ $('composer').addEventListener('submit', (e) => {
     try {
       await api('message', {text, targets, roomId: S.roomId, imageIds});
       input.value = '';
+      try { localStorage.removeItem(draftKey(S.roomId)); } catch {}
       clearAttachments();
       await refresh();
       scrollBottom();
@@ -1117,6 +1213,11 @@ $('composer').addEventListener('submit', (e) => {
       $('send').disabled = S.readOnly;
     }
   });
+});
+
+$('message').addEventListener('input', () => {
+  clearTimeout(saveDraft.timer);
+  saveDraft.timer = setTimeout(saveDraft, 300);
 });
 
 $('message').addEventListener('keydown', (e) => {
@@ -1151,24 +1252,38 @@ $('message').addEventListener('paste', (e) => {
 }
 
 $('pause').addEventListener('click', () => void act(async () => {
-  await api('options', {paused: !S.state?.settings?.paused});
+  const room = currentRoom();
+  if (!room) return;
+  await api('options', {roomId: room.id, paused: !room.paused});
+  await refresh();
+}));
+
+$('pause-all').addEventListener('click', () => void act(async () => {
+  const concurrency = S.concurrency || {};
+  if (!concurrency.pausedAll && !confirm('暂停所有话题的投递？各话题自己的暂停状态会保留，恢复后按原状态继续。')) return;
+  await api('scheduler', {pausedAll: !concurrency.pausedAll});
+  await refresh();
+}));
+
+$('concurrency-limit').addEventListener('change', () => void act(async () => {
+  await api('scheduler', {limit: Number($('concurrency-limit').value)});
   await refresh();
 }));
 
 $('mode').addEventListener('change', () => void act(async () => {
-  await api('options', {mode: $('mode').value});
+  await api('options', {roomId: S.roomId, mode: $('mode').value});
   await refresh();
 }));
 $('budget').addEventListener('change', () => void act(async () => {
-  await api('options', {maxTurns: Number($('budget').value)});
+  await api('options', {roomId: S.roomId, maxTurns: Number($('budget').value)});
   await refresh();
 }));
 $('dialog-mode').addEventListener('change', () => void act(async () => {
-  await api('options', {mode: $('dialog-mode').value});
+  await api('options', {roomId: S.roomId, mode: $('dialog-mode').value});
   await refresh();
 }));
 $('dialog-budget').addEventListener('change', () => void act(async () => {
-  await api('options', {maxTurns: Number($('dialog-budget').value)});
+  await api('options', {roomId: S.roomId, maxTurns: Number($('dialog-budget').value)});
   await refresh();
 }));
 
@@ -1331,5 +1446,6 @@ $('provision').addEventListener('click', () => void act(async () => {
 
 await refresh();
 await refreshQuota();
+restoreDraft();
 setInterval(() => void refresh(), 1800);
 setInterval(() => void refreshQuota(), 60000);
