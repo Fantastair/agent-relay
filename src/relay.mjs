@@ -100,7 +100,7 @@ export class Relay{
       let delivery=linked?this.store.forMessage(linked.env.id,side):this.store.jobs(side,['running','unknown']).find(d=>matches(d)&&(d.receipt?.nativeTurnId===turn.id||turn.inputs.some(i=>i.requestId===(d.batchId||d.id))));
       if(!batch&&delivery?.batchId)batch=this.store.batch(delivery.batchId);
       if(batch)delivery=this.store.batchDeliveries(batch.id).at(-1);
-      if(!batch&&turn.inputs.some(input=>parseBatchEnvelope(input.text))){if(terminal(turn.status)&&!this.store.seen(side,sessionId,'turn:'+turn.id)){this.store.log('attention','无法核对批次原文与成员，已跳过该轮自动转发，请回查原生记录',originRoomId);this.store.markSeen(side,sessionId,'turn:'+turn.id);}continue;}
+      if(!batch&&(!delivery&&turn.inputs.some(input=>parseEnvelope(input.text))||turn.inputs.some(input=>parseBatchEnvelope(input.text)))){if(terminal(turn.status)&&!this.store.seen(side,sessionId,'turn:'+turn.id)){this.store.log('attention','无法核对信封原文与投递成员，已跳过该轮自动转发，请回查原生记录',originRoomId);this.store.markSeen(side,sessionId,'turn:'+turn.id);}continue;}
       if(delivery&&!['completed','cancelled'].includes(delivery.status)){
         const receipt={...delivery.receipt,nativeTurnId:turn.id,requestId:batch?.id||delivery.id,...(batch?{batchId:batch.id}:{})};
         if(terminal(turn.status)&&turn.status!=='completed')this.updateUnit(delivery,turn.status==='blocked'?'blocked':'failed',{receipt,error:`原生轮次 ${turn.status}${turn.reason?'：'+turn.reason:''}`});

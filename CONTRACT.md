@@ -311,3 +311,15 @@ M1/M3/M4/M5 沿用已确认实现；M2 双方同意不按超时自动判空闲�
 - 保留seen及不含正文的deleted_relay_refs（消息/批次/请求/原生轮次标识），阻止已删投递的迟到回复重新落库或接力。inbox的latestCursor改读AUTOINCREMENT高水位，删除最新事件后旧游标仍有效，重启亦不会倒退。
 - `/api/health.features` 增加 `room-delete-v1`。新增6项隔离测试；全量91项通过。接口需要重启后端才生效，禁止用正式聊天数据验证删除。
 - 另一个标签页请求已删除话题的state时，返回当前活动话题的state（通过不含正文的room删除标识识别，普通无效ID仍拒绝）。前端应优先使用返回的roomId，不能把活动话题的消息配到列表第一项。
+
+## 14. topic-parallel-v1：现有话题直接并行（2026-10-26，双方确认）
+
+- 不增加群层。`state.rooms[]` 扩展 `paused:boolean,mode,maxTurns,queueLength:number,runState,sharedWith:[{roomId,title}],health:{codex,deepseek}`；保留原有codexId/deepseekId/workspaceId等字段。runState为idle/queued/running/waiting/paused/unbound；归档话题固定idle，readOnly只由归档决定。waiting包括明确等待用户回答、投递失败/不确定结果需要回查，不据running猜测具体审批状态。
+- 顶层 `concurrency:{limit,running,pausedAll}`；limit为正安全整数，不硬编码8。默认2为初始配置，可设4、8或更高。running按实际在途话题数计数，一话题两端同时运行只占一个槽；unknown但原生明确running也计入。不确定结果即使原生已空闲仍锁住原会话、禁止重发，不妨碍其他独立会话。
+- `POST /api/options {roomId,paused?,mode?,maxTurns?}`：逐项校验后一次提交，仅改指定话题；未知roomId为404。归档话题允许改配置，不能发送。`POST /api/scheduler {limit?,pausedAll?}`：同源cookie或Bearer可用；总闸不覆盖各话题paused，降低limit不打断已运行轮次。
+- 发消息、绑定、创建独立会话、声明技能/图片能力必须显式携带roomId。绑定接口仍用`/api/bind-pair`，为指定话题原地更换一对会话，暂停该话题，不改变其他绑定；`/api/provision {roomId,workspaceId}`创建并绑定独立会话，不重放旧历史。原生会话创建可能失败并留下可回查的草稿，不自动重试。
+- 浏览`rooms/select`只改变默认查看位置。`rooms/activate`用于恢复归档话题，保持其投递暂停。全局activeRoomId仅保留作兼容默认，不能用来判断哪些话题允许投递。归档/删除/换绑校验对应话题，不再被其他话题队列阻塞；删除最后一个默认话题前需先创建另一个。
+- 每个话题使用固定上下文的原有Relay引擎，独立保存配置、合批、图片能力及protocolReady。外层调度器按投递单元轮转，并用两侧原生会话ID做互斥。相同会话或部分重合的一对会话均串行，允许同时排队，但共享原生上下文。
+- 收件过滤先看持久化投递/批次/原生回执所属话题，迟到回复不随浏览或当前绑定迁移；无法核对的信封不自动转发。共用原生会话里的无关联直接输入无法确定所属话题时记录提示，不猜测导入位置。信封第一行保持原格式，追加第二行`[relay-topic roomId=<id>]`供Agent/CLI定位话题；不得按正文内嵌标记重新拆分成员。
+- SQLite新增room_options，首次迁移仅原默认话题继承旧投递开关，其他旧话题默认暂停；现有记录、回执和seen保留。服务启动启用全局总暂停，用户或已授权部署过程确认后恢复；各话题paused不被启动重写。
+- `scripts/parallel-preview.mjs`提供4332全模拟预览，6个话题，初始总暂停；模拟任务约12秒完成，无原生投递或额度查询。独立话题A/B/C、共用会话、暂停与归档场景均具备。

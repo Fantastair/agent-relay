@@ -25,6 +25,8 @@ export class Store{
         INSERT OR IGNORE INTO message_events(message_id) SELECT id FROM messages ORDER BY created_at,rowid;
         CREATE TRIGGER IF NOT EXISTS message_event_insert AFTER INSERT ON messages BEGIN INSERT OR IGNORE INTO message_events(message_id) VALUES(NEW.id); END;`);
       this.db.exec(`CREATE TABLE IF NOT EXISTS deleted_relay_refs(kind TEXT NOT NULL,ref TEXT NOT NULL,side TEXT NOT NULL DEFAULT '',session_id TEXT NOT NULL DEFAULT '',PRIMARY KEY(kind,ref,side,session_id));`);
+      this.db.exec('CREATE TABLE IF NOT EXISTS room_options(room_id TEXT PRIMARY KEY REFERENCES rooms(id),value TEXT NOT NULL)');
+      for(const room of this.rooms())if(!this.db.prepare('SELECT 1 FROM room_options WHERE room_id=?').get(room.id))this.writeRoomOptions(room.id,{paused:room.id===active?this.get('paused',true):true,mode:this.get('mode','auto'),maxTurns:this.get('maxTurns',6),protocolReady:this.get('protocolReady',{}),imageCapabilities:this.get('imageCapabilities',{})});
       this.db.exec('CREATE INDEX IF NOT EXISTS message_room ON messages(room_id,created_at);CREATE INDEX IF NOT EXISTS delivery_room ON deliveries(room_id,side,status);CREATE INDEX IF NOT EXISTS log_room ON logs(room_id,id)');
       this.db.prepare("UPDATE deliveries SET status='unknown',error='服务重启时投递尚未确认，正在回查原生记录',updated_at=? WHERE status='sending'").run(Date.now());
       this.db.prepare("UPDATE batches SET status='unknown',error='服务重启时整批投递尚未确认，正在回查原生记录',updated_at=? WHERE status='sending'").run(Date.now());
@@ -36,17 +38,21 @@ export class Store{
   decodeRoom(r){return r?{id:r.id,title:r.title,kind:r.kind,parentId:r.parent_id,codexId:r.codex_id,deepseekId:r.deepseek_id,workspaceId:r.workspace_id,createdAt:r.created_at,updatedAt:r.updated_at,lastAt:r.updated_at,archivedAt:r.archived_at,archived:!!r.archived_at,messageCount:Number(r.message_count||0),lastMessage:r.last_message||''}:null;}
   room(roomId){if(typeof roomId!=='string'||!roomId||roomId.length>256)return null;return this.decodeRoom(this.db.prepare('SELECT r.*,(SELECT count(*) FROM messages m WHERE m.room_id=r.id AND coalesce(json_extract(m.meta,\'$.silent\'),0)!=1) AS message_count,(SELECT text FROM messages m WHERE m.room_id=r.id AND coalesce(json_extract(m.meta,\'$.silent\'),0)!=1 ORDER BY created_at DESC,rowid DESC LIMIT 1) AS last_message FROM rooms r WHERE id=?').get(roomId));}
   rooms(){return this.db.prepare('SELECT id FROM rooms ORDER BY updated_at DESC,rowid DESC').all().map(r=>this.room(r.id));}
+  roomOptions(roomId){this.requireRoom(roomId);const row=this.db.prepare('SELECT value FROM room_options WHERE room_id=?').get(roomId);return {paused:true,mode:'auto',maxTurns:6,...(row?JSON.parse(row.value):{})};}
+  writeRoomOptions(roomId,options){this.requireRoom(roomId);this.db.prepare('INSERT INTO room_options(room_id,value) VALUES(?,?) ON CONFLICT(room_id) DO UPDATE SET value=excluded.value').run(roomId,JSON.stringify(options));}
+  patchRoomOptions(roomId,changes){this.writeRoomOptions(roomId,{...this.roomOptions(roomId),...changes});return this.roomOptions(roomId);}
+  bindRoom(roomId,{codexId,deepseekId,workspaceId}){this.requireRoom(roomId);this.db.prepare('UPDATE rooms SET codex_id=?,deepseek_id=?,workspace_id=?,updated_at=? WHERE id=?').run(codexId??null,deepseekId??null,workspaceId??null,Date.now(),roomId);return this.room(roomId);}
   requireRoom(roomId){const room=this.room(roomId);if(!room)throw new RelayError('话题不存在，请刷新列表','input');return room;}
   createRoom({title='新话题',kind='binding',parentId=null,codexId=null,deepseekId=null,workspaceId=null}={}){const roomId=id(),now=Date.now();this.db.prepare('INSERT INTO rooms(id,title,codex_id,deepseek_id,workspace_id,created_at,updated_at,kind,parent_id) VALUES(?,?,?,?,?,?,?,?,?)').run(roomId,title,codexId,deepseekId,workspaceId,now,now,kind,parentId);return this.room(roomId);}
   activateRoom(roomId){const room=this.requireRoom(roomId),now=Date.now();this.db.prepare('UPDATE rooms SET archived_at=NULL,updated_at=? WHERE id=?').run(now,roomId);this.set('activeRoomId',roomId);this.set('selectedRoomId',roomId);this.set('codexId',room.codexId);this.set('deepseekId',room.deepseekId);this.set('workspaceId',room.workspaceId);this.set('paused',true);return this.room(roomId);}
   renameRoom(roomId,title){this.requireRoom(roomId);this.db.prepare('UPDATE rooms SET title=?,updated_at=? WHERE id=?').run(title,Date.now(),roomId);return this.room(roomId);}
   archiveRoom(roomId,archived){this.requireRoom(roomId);this.db.prepare('UPDATE rooms SET archived_at=?,updated_at=? WHERE id=?').run(archived?Date.now():null,Date.now(),roomId);return this.room(roomId);}
   deletedRef(kind,ref,side='',sessionId=''){return typeof ref==='string'&&!!this.db.prepare('SELECT 1 FROM deleted_relay_refs WHERE kind=? AND ref=? AND side=? AND session_id=?').get(kind,ref,side,sessionId);}
-  deleteRoom(roomId){return this.transaction(()=>{
+  deleteRoom(roomId,{replacementRoomId}={}){return this.transaction(()=>{
     if(typeof roomId!=='string'||!roomId||roomId.length>256)throw new RelayError('请选择有效的话题','input');
     if(!this.room(roomId))throw new RelayError('话题不存在，可能已经删除，请刷新列表','not_found');
-    const activeRoomId=this.activeRoomId();
-    if(roomId===activeRoomId)throw new RelayError('当前投递话题不能删除，请先新建或继续其他话题','busy');
+    let activeRoomId=this.activeRoomId();
+    if(roomId===activeRoomId){if(!replacementRoomId||replacementRoomId===roomId)throw new RelayError('当前投递话题不能删除，请先新建或继续其他话题','busy');this.requireRoom(replacementRoomId);activeRoomId=replacementRoomId;this.set('activeRoomId',activeRoomId);}
     if(this.db.prepare("SELECT 1 FROM deliveries WHERE room_id=? AND status NOT IN ('completed','cancelled') LIMIT 1").get(roomId)||this.db.prepare("SELECT 1 FROM batches WHERE room_id=? AND status NOT IN ('completed','cancelled') LIMIT 1").get(roomId))throw new RelayError('该话题存在未完成投递，请先完成、取消或处理后再删除','busy');
     // Keep opaque identities, never message content, so late native receipts
     // cannot resurrect deleted conversations after their delivery rows are gone.
@@ -72,6 +78,7 @@ export class Store{
     this.db.prepare('DELETE FROM messages WHERE room_id=?').run(roomId);
     this.db.prepare('DELETE FROM logs WHERE room_id=?').run(roomId);
     this.db.prepare('UPDATE rooms SET parent_id=NULL WHERE parent_id=?').run(roomId);
+    this.db.prepare('DELETE FROM room_options WHERE room_id=?').run(roomId);
     this.db.prepare('DELETE FROM rooms WHERE id=?').run(roomId);
     if(this.get('selectedRoomId',activeRoomId)===roomId)this.set('selectedRoomId',activeRoomId);
     return {ok:true,roomId,selectedRoomId:this.get('selectedRoomId',activeRoomId)};

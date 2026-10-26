@@ -32,7 +32,7 @@ test('HTTP UI authenticates locally, rejects cross-site mutation and defaults to
     assert.equal((await fetch(base+'/api/state')).status,401);
     assert.equal((await fetch(base+'/api/options',{method:'POST',headers:{cookie,'content-type':'application/json'},body:'{}'})).status,403);
     service.store.set('codexId','c');service.store.set('deepseekId','d');
-    const result=await fetch(base+'/api/message',{method:'POST',headers:{cookie,origin:base,'x-relay-ui':'1','content-type':'application/json'},body:JSON.stringify({text:'from browser'})});
+    const result=await fetch(base+'/api/message',{method:'POST',headers:{cookie,origin:base,'x-relay-ui':'1','content-type':'application/json'},body:JSON.stringify({roomId:service.store.activeRoomId(),text:'from browser'})});
     assert.equal(result.status,200);assert.equal(service.store.state().deliveries.length,2);
     const status=await new Promise((resolve,reject)=>{http.get(base+'/api/state',{headers:{host:'evil.example',cookie}},r=>{r.resume();resolve(r.statusCode);}).on('error',reject);});
     assert.equal(status,403);

@@ -120,6 +120,7 @@ test('HTTP deletion enforces local authentication, CSRF and 404/409 contract, an
     service.store.addMessage({sender:'user',text:'old',roomId:old.id});service.store.set('selectedRoomId',old.id);
     assert.equal((await post({roomId:old.id},{'content-type':'application/json'})).status,401);
     assert.equal((await post({roomId:old.id},{...headers,origin:'https://other.example'})).status,403);
+    const protectActive=service.store.addMessage({sender:'user',text:'active queue',roomId:active});service.store.enqueue(protectActive,'codex');
     assert.equal((await post({roomId:active})).status,409);assert.equal((await post({})).status,400);
     const blocked=service.store.addMessage({sender:'user',text:'queued',roomId:other.id});
     service.store.db.prepare('INSERT INTO deliveries(id,message_id,side,status,created_at,updated_at,room_id,session_id) VALUES(?,?,?,?,?,?,?,?)').run(id(),blocked.id,'codex','unknown',1,1,other.id,'old-native-session');

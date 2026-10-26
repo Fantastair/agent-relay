@@ -65,7 +65,7 @@ test('compact protocol requires both bound sessions to declare the same loaded v
     h.relay.confirmProtocol({side:'codex',sessionId:'c',version:'1.1.0'});assert.equal(h.relay.protocolState().mode,'reminder');
     h.relay.confirmProtocol({side:'deepseek',sessionId:'d',version:'1.0.0'});assert.equal(h.relay.protocolState().mode,'reminder');
     h.relay.confirmProtocol({side:'deepseek',sessionId:'d',version:'1.1.0'});assert.equal(h.relay.protocolState().mode,'compact');
-    const compact=envelope(msg,{compact:true});assert.equal(compact,`[relay from=user id=${msg.id} reply-to=-]\ntask`);assert.equal(parseEnvelope(compact).id,msg.id);
+    const compact=envelope(msg,{compact:true});assert.equal(compact,`[relay from=user id=${msg.id} reply-to=-]\n[relay-topic roomId=${msg.roomId}]\ntask`);assert.equal(parseEnvelope(compact).id,msg.id);
     h.store.set('deepseekId','different-session');assert.equal(h.relay.protocolState().mode,'reminder');
     assert.throws(()=>h.relay.confirmProtocol({side:'deepseek',sessionId:'d',version:'1.1.0'}),/当前侧/);
   }finally{h.store.close();}
@@ -78,7 +78,7 @@ test('HTTP enforces human versus tool authors, authenticates inbox and protocol,
     service.store.set('codexId','c');service.store.set('deepseekId','d');
     assert((await (await fetch(base+'/api/health')).json()).features.includes('message-attribution-v1'));
     const cookie=(await fetch(base)).headers.get('set-cookie').split(';')[0];
-    const post=(route,body,tool=false)=>fetch(base+'/api/'+route,{method:'POST',headers:{'content-type':'application/json',...(tool?{authorization:'Bearer '+service.key}:{cookie,origin:base,'x-relay-ui':'1'})},body:JSON.stringify(body)});
+    const post=(route,body,tool=false)=>fetch(base+'/api/'+route,{method:'POST',headers:{'content-type':'application/json',...(tool?{authorization:'Bearer '+service.key}:{cookie,origin:base,'x-relay-ui':'1'})},body:JSON.stringify({roomId:service.store.activeRoomId(),...body})});
     assert.equal((await post('message',{text:'human'})).status,200);
     assert.equal((await post('message',{text:'spoof',sender:'deepseek',origin:'agent'})).status,403);
     assert.equal((await post('message',{text:'implicit tool'},true)).status,403);

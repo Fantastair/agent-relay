@@ -119,7 +119,7 @@ test('HTTP image endpoints require authentication, cookie CSRF checks and a sepa
   const dir=await mkdtemp(path.join(tmpdir(),'relay-media-http-')),service=await makeService({dataDir:dir,adapters:mocks()});await new Promise(resolve=>service.server.listen(0,'127.0.0.1',resolve));const base='http://127.0.0.1:'+service.server.address().port;
   try{
     service.store.set('codexId','c');service.store.set('deepseekId','d');const home=await fetch(base),cookie=home.headers.get('set-cookie').split(';')[0];assert.match(home.headers.get('content-security-policy'),/blob:/);
-    const headers={cookie,origin:base,'x-relay-ui':'1','content-type':'application/json'},post=(route,body,h=headers)=>fetch(base+'/api/'+route,{method:'POST',headers:h,body:JSON.stringify(body)});
+    const headers={cookie,origin:base,'x-relay-ui':'1','content-type':'application/json'},post=(route,body,h=headers)=>fetch(base+'/api/'+route,{method:'POST',headers:h,body:JSON.stringify({roomId:service.store.activeRoomId(),...body})});
     assert.equal((await post('image',{dataUrl},{'content-type':'application/json'})).status,401);assert.equal((await post('image',{dataUrl},{cookie,'content-type':'application/json'})).status,403);
     const uploaded=await post('image',{dataUrl});assert.equal(uploaded.status,200);const {image}=await uploaded.json();
     assert.equal((await fetch(base+image.url)).status,401);const binary=await fetch(base+image.url,{headers:{cookie}});assert.equal(binary.headers.get('content-type'),'image/png');assert.equal(binary.headers.get('x-content-type-options'),'nosniff');assert(Buffer.from(await binary.arrayBuffer()).equals(Buffer.from(png,'base64')));

@@ -144,7 +144,7 @@ test('immutable delivery target blocks accidental routing when settings are exte
   }finally{h.store.close();}
 });
 
-test('HTTP room contract filters history, rejects stale sends and preserves local authentication',async()=>{
+test('HTTP room contract permits background sends, rejects archived writes and preserves local authentication',async()=>{
   const dir=await mkdtemp(path.join(tmpdir(),'relay-room-http-')),h=harness();
   const service=await makeService({dataDir:dir,adapters:h.adapters});await new Promise(r=>service.server.listen(0,'127.0.0.1',r));
   const base='http://127.0.0.1:'+service.server.address().port;
@@ -156,15 +156,17 @@ test('HTTP room contract filters history, rejects stale sends and preserves loca
     assert.equal((await (await fetch(base+'/api/state?roomId='+old.roomId,{headers:{cookie}})).json()).messages[0].text,'retained');
     assert.equal((await (await fetch(base+'/api/export?roomId='+room.id,{headers:{cookie}})).json()).messages.length,0);
     assert.equal((await (await fetch(base+'/api/export',{headers:{cookie}})).json()).messages.length,1);
-    assert.equal((await post('message',{roomId:old.roomId,text:'stale'})).status,400);
+    const background=await post('message',{roomId:old.roomId,text:'background'});assert.equal(background.status,200);const backgroundMessage=(await background.json()).message;
+    for(const side of ['codex','deepseek'])service.relay.cancel(service.store.forMessage(backgroundMessage.id,side).id);
     assert.equal((await post('rooms/select',{roomId:old.roomId})).status,200);
     assert.equal((await post('message',{text:'implicit stale'})).status,400);
     assert.equal((await post('rooms/update',{roomId:old.roomId,title:'Renamed',archived:true})).status,200);
     assert(service.store.room(old.roomId).archived);assert.equal(service.store.room(old.roomId).title,'Renamed');
+    assert.equal((await post('message',{roomId:old.roomId,text:'archived'})).status,400);
     assert.equal((await post('rooms/activate',{roomId:old.roomId})).status,200);
-    assert.equal(service.store.get('paused'),true);assert.equal(service.store.room(old.roomId).archived,false);
+    assert.equal(service.store.roomOptions(old.roomId).paused,true);assert.equal(service.store.room(old.roomId).archived,false);
     assert.equal((await post('rooms/update',{roomId:old.roomId,title:'x'.repeat(81)})).status,400);
-    assert.equal((await fetch(base+'/api/state?roomId=missing',{headers:{cookie}})).status,400);
+    assert.equal((await fetch(base+'/api/state?roomId=missing',{headers:{cookie}})).status,404);
     assert.equal((await fetch(base+'/api/state?roomId='+old.roomId)).status,401);
   }finally{await service.close();h.store.close();await rm(dir,{recursive:true,force:true});}
 });
