@@ -450,6 +450,9 @@ dialog::backdrop{background:rgba(16,26,40,.42);backdrop-filter:blur(2px)}
 .dialog-section .btn{margin-top:4px}
 .fine{margin:9px 0 0;font-size:11px;color:var(--faint);line-height:1.6}
 .dialog-note{margin:0;padding:12px 20px 18px;font-size:11px;color:var(--faint);line-height:1.6}
+.dialog-actions{display:flex;gap:8px;justify-content:flex-end;padding:0 20px 18px}
+.room-delete:hover{background:#f6e3e0;color:var(--red)}
+.room-item.active .room-delete:hover{background:#f6e3e0}
 
 .only-narrow{display:none}
 

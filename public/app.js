@@ -442,7 +442,12 @@ function roomItem(room) {
     arch.setAttribute('aria-label', arch.title);
     arch.disabled = !room.archived && room.id === S.activeRoomId;
     arch.onclick = (e) => { e.stopPropagation(); toggleArchive(room); };
-    tools.append(rename, arch);
+    const del = el('button', 'icon-btn room-delete', '✕');
+    del.title = room.id === S.activeRoomId ? '当前投递话题不能删除' : '删除话题';
+    del.setAttribute('aria-label', del.title);
+    del.disabled = room.id === S.activeRoomId;
+    del.onclick = (e) => { e.stopPropagation(); askDeleteRoom(room); };
+    tools.append(rename, arch, del);
     item.append(tools);
   }
 
@@ -834,8 +839,7 @@ function renameRoom(room) {
   });
 }
 
-function toggleArchive(room) {
-  void act(async () => {
+function toggleArchive(room) {  void act(async () => {
     await api('rooms/update', {roomId: room.id, archived: !room.archived});
     if (!room.archived) {
       S.archivedOpen = true;
@@ -848,8 +852,25 @@ function toggleArchive(room) {
   });
 }
 
-async function newTopic() {
-  void act(async () => {
+let pendingDelete = null;
+
+function askDeleteRoom(room) {
+  if (room.id === S.activeRoomId) {
+    toast('当前投递话题不能删除，请先切换到其他话题');
+    return;
+  }
+  pendingDelete = room;
+  $('delete-desc').textContent = '将删除「' + (room.title || '未命名话题') + '」及其全部聊天与投递记录。';
+  $('delete-dialog').showModal();
+}
+
+function closeDeleteDialog() {
+  pendingDelete = null;
+  const dlg = $('delete-dialog');
+  if (dlg?.open) dlg.close();
+}
+
+async function newTopic() {  void act(async () => {
     const res = await api('rooms', {});
     if (res?.room?.id) {
       S.roomId = res.room.id;
@@ -1196,6 +1217,30 @@ $('settings-dialog').addEventListener('click', (e) => {
     if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) e.target.close();
   }
 });
+
+$('delete-close').addEventListener('click', closeDeleteDialog);
+$('delete-cancel').addEventListener('click', closeDeleteDialog);
+$('delete-dialog').addEventListener('click', (e) => {
+  if (e.target === $('delete-dialog')) closeDeleteDialog();
+});
+$('delete-confirm').addEventListener('click', () => void act(async () => {
+  const room = pendingDelete;
+  if (!room) return;
+  $('delete-confirm').disabled = true;
+  try {
+    await api('rooms/delete', {roomId: room.id});
+    const wasViewing = S.roomId === room.id;
+    closeDeleteDialog();
+    if (wasViewing) {
+      S.roomId = S.activeRoomId;
+      S.signature = '';
+    }
+    await refresh();
+    toast('已删除话题「' + (room.title || '未命名') + '」');
+  } finally {
+    $('delete-confirm').disabled = false;
+  }
+}));
 
 $('empty-settings')?.addEventListener('click', () => void openSettings());
 
