@@ -129,6 +129,18 @@ test('a stalled native snapshot cannot stop subsequent polling cycles for health
   }finally{release();await first;h.store.close();}
 });
 
+test('late handled replies are still reconciled into their original topic after that topic receives independent bindings',async()=>{
+  const h=harness();try{
+    const a=h.room('source'),message=h.relay.sendUser('old native task',['codex'],a.id);
+    await h.relay.tick('codex');const delivery=h.store.forMessage(message.id,'codex');
+    h.store.updateDelivery(delivery.id,'unknown');h.relay.resolve(delivery.id,'handled',true);
+    await h.relay.bindPair({roomId:a.id,codexId:'new-c',deepseekId:'new-d'});
+    h.finish(message,'codex','late old reply');await h.relay.tick('codex');
+    const history=h.store.state(a.id).messages;assert.equal(history.length,2);assert.equal(history[1].replyTo,message.id);
+    assert.equal(h.store.room(a.id).codexId,'new-c');assert.equal(h.store.jobs('deepseek',undefined,a.id).length,0);assert.equal(h.sent.length,1);
+  }finally{h.store.close();}
+});
+
 test('HTTP per-topic settings and scheduler require explicit routing and retain local CSRF protection',async()=>{
   const h=harness(),dir=await mkdtemp(path.join(tmpdir(),'relay-parallel-http-')),service=await makeService({dataDir:dir,adapters:h.adapters});
   await new Promise(r=>service.server.listen(0,'127.0.0.1',r));const base='http://127.0.0.1:'+service.server.address().port;
@@ -139,6 +151,7 @@ test('HTTP per-topic settings and scheduler require explicit routing and retain 
     assert.equal((await post('options',{roomId:room.id,paused:false,mode:'manual'})).status,200);
     assert.equal((await post('options',{roomId:'missing',paused:false})).status,404);
     assert.equal((await post('options',{paused:false})).status,400);
+    assert.equal((await post('rooms',{})).status,400);
     assert.equal((await post('scheduler',{limit:12,pausedAll:false})).status,200);
     assert.equal((await post('scheduler',{limit:0,pausedAll:true})).status,400);
     assert.equal((await post('scheduler',{pausedAll:true},{origin:'https://evil.example'})).status,403);

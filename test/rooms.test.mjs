@@ -152,7 +152,7 @@ test('HTTP room contract permits background sends, rejects archived writes and p
     const home=await fetch(base),cookie=home.headers.get('set-cookie').split(';')[0];
     const post=async(url,body)=>fetch(base+'/api/'+url,{method:'POST',headers:{cookie,origin:base,'x-relay-ui':'1','content-type':'application/json'},body:JSON.stringify(body)});
     service.store.set('codexId','c');service.store.set('deepseekId','d');const old=service.store.addMessage({sender:'user',text:'retained'});
-    let r=await post('rooms',{title:'HTTP topic'});assert.equal(r.status,200);const {room}=await r.json();
+    let r=await post('rooms',{roomId:old.roomId,title:'HTTP topic'});assert.equal(r.status,200);const {room}=await r.json();
     assert.equal((await (await fetch(base+'/api/state?roomId='+old.roomId,{headers:{cookie}})).json()).messages[0].text,'retained');
     assert.equal((await (await fetch(base+'/api/export?roomId='+room.id,{headers:{cookie}})).json()).messages.length,0);
     assert.equal((await (await fetch(base+'/api/export',{headers:{cookie}})).json()).messages.length,1);

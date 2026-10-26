@@ -49,7 +49,7 @@ export class ParallelRelay{
     this.store=store;this.adapters=adapters;this.images=images;
     this.engines=new Map();this.leases=new Set();this.reserved=new Set();this.lastServed=new Map();this.sequence=0;
     this.sessionHealth=new Map();this.snapshots=new Map();this.polling=new Map();this.ticks=new Set();this.mutations=new Set();
-    this.provisioning=new Set();this.closed=false;this.health={};this.busy={};
+    this.historicalBackoff=new Map();this.closed=false;this.health={};this.busy={};
   }
   notify(){this.onChange?.();}
   defaultRoom(){return this.store.get('selectedRoomId',this.store.activeRoomId());}
@@ -64,7 +64,7 @@ export class ParallelRelay{
         const key=resourceKey(side,sessionId);let request=this.snapshots.get(key);
         if(!request){request=Promise.resolve().then(()=>this.adapters[side].snapshot(sessionId,options));this.snapshots.set(key,request);}
         let snapshot;try{snapshot=await request;}catch(error){this.sessionHealth.set(key,{ok:false,state:'offline',error:safeError(error),checkedAt:Date.now()});throw error;}
-        this.sessionHealth.set(key,{ok:true,state:snapshot.state,title:snapshot.title,cwd:snapshot.cwd,checkedAt:Date.now()});
+        this.sessionHealth.set(key,{ok:true,state:snapshot.state,hasInProgressTurn:snapshot.turns.some(turn=>turn.status==='inProgress'),title:snapshot.title,cwd:snapshot.cwd,checkedAt:Date.now()});
         return {...snapshot,turns:snapshot.turns.filter(turn=>this.belongs(turn,side,sessionId,roomId))};
       },
       send:async(sessionId,text,requestId)=>{
@@ -129,7 +129,7 @@ export class ParallelRelay{
     if(this.closed)return;
     // Only the individual native session is coalesced. A slow session must
     // never stop later timer cycles from polling/reconciling healthy sessions.
-    const operation=(async()=>{await this.pollPass(side);await this.pollPass(side);})();
+    const operation=(async()=>{await this.pollPass(side);await this.pollHistorical(side);await this.pollPass(side);})();
     this.ticks.add(operation);try{await operation;}finally{this.ticks.delete(operation);}
   }
   async pollPass(side){
@@ -149,6 +149,25 @@ export class ParallelRelay{
         }
       })();
       this.polling.set(key,operation);try{await operation;}finally{this.polling.delete(key);this.snapshots.delete(key);}
+    }));
+  }
+  async pollHistorical(side){
+    if(this.closed)return;
+    const groups=new Map();
+    for(const delivery of this.store.jobs(side,['cancelled'])){
+      if(!delivery.attempts||!delivery.sessionId||delivery.sessionId===this.sessionId(side,delivery.roomId))continue;
+      if(delivery.receipt?.nativeTurnId&&this.store.seen(side,delivery.sessionId,'turn:'+delivery.receipt.nativeTurnId))continue;
+      const key=resourceKey(side,delivery.sessionId);if(!groups.has(key))groups.set(key,new Set());groups.get(key).add(delivery.roomId);
+    }
+    await Promise.all([...groups].map(async([key,roomIds])=>{
+      if(this.polling.has(key)||Date.now()<(this.historicalBackoff.get(key)||0))return;
+      const sessionId=JSON.parse(key)[1];
+      const operation=(async()=>{try{
+        const snapshot=await this.adapters[side].snapshot(sessionId,{knownTurn:turnId=>this.store.seen(side,sessionId,'turn:'+turnId)});
+        if(this.closed)return;
+        for(const roomId of roomIds)if(this.store.room(roomId))this.ingest(side,sessionId,snapshot,roomId);
+      }catch(error){this.historicalBackoff.set(key,Date.now()+60000);for(const roomId of roomIds)if(this.store.room(roomId))this.store.log('attention','旧会话回执暂时无法回查，未重发任何消息：'+safeError(error),roomId);}})();
+      this.polling.set(key,operation);try{await operation;}finally{this.polling.delete(key);}
     }));
   }
   start(){this.timer=setInterval(()=>{for(const side of SIDES)void this.tick(side);},1800);for(const side of SIDES)void this.tick(side);}

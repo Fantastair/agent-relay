@@ -37,7 +37,7 @@ export async function makeService({dataDir=path.join(root,'data'),config={},adap
     if(pathname==='/api/catalog'&&req.method==='GET')return send(200,await catalog.get({partial:url.searchParams.get('partial')==='1',refresh:url.searchParams.get('refresh')==='1'}));
     if(req.method!=='POST')return send(404,{error:'接口不存在'});let size=0,parts=[];for await(const part of req){size+=part.length;if(size>(pathname==='/api/image'?2*1024*1024:256000))throw new RelayError('请求过大','input');parts.push(part);}let body;try{body=JSON.parse(Buffer.concat(parts).toString('utf8')||'{}');}catch{throw new RelayError('请求格式不正确','input');}
     if(!body||typeof body!=='object'||Array.isArray(body))throw new RelayError('请求必须是 JSON 对象','input');
-    if(['/api/options','/api/message','/api/bind','/api/bind-pair','/api/provision','/api/capabilities/image','/api/protocol/ready'].includes(pathname)&&typeof body.roomId!=='string')throw new RelayError('操作必须明确指定话题 roomId','input');
+    if(['/api/options','/api/message','/api/bind','/api/bind-pair','/api/provision','/api/capabilities/image','/api/protocol/ready','/api/rooms','/api/rooms/create'].includes(pathname)&&typeof body.roomId!=='string')throw new RelayError('操作必须明确指定话题 roomId','input');
     if(pathname==='/api/image')return send(200,{image:await images.upload(body)});
     if(pathname==='/api/capabilities/image'){if(!hasBearer)return send(403,{error:'仅本机 Agent 可声明经过核验的图像能力'});return send(200,relay.confirmImageCapability(body));}
     if(pathname==='/api/message'){
@@ -62,7 +62,7 @@ export async function makeService({dataDir=path.join(root,'data'),config={},adap
     if(pathname==='/api/shutdown'){send(200,{ok:true});setImmediate(()=>void service.close());return;}
     if(pathname==='/api/provision'){
       const room=relay.requireRoom(body.roomId);if(room.archived)throw new RelayError('请先恢复归档话题','input');let reserved=false;
-      try{await relay.reserveSides(['codex','deepseek'],room.id);reserved=true;relay.assertQueueSettled(room.id);await relay.checkRoomBindings(room);const pair=await provisionNewPair({store:relay.context(room.id),roomId:room.id,codex:c,deepseek:d,workspaceId:body.workspaceId,title:body.title,defaultWorkspacePath:path.resolve(root,'..')});relay.changedRoom();void catalog.refresh({force:true});return send(200,pair);
+      try{await relay.reserveSides(['codex','deepseek'],room.id);reserved=true;relay.assertQueueSettled(room.id);const pair=await provisionNewPair({store:relay.context(room.id),roomId:room.id,codex:c,deepseek:d,workspaceId:body.workspaceId||room.workspaceId,title:body.title,defaultWorkspacePath:path.resolve(root,'..')});relay.changedRoom();void catalog.refresh({force:true});return send(200,pair);
       }finally{if(reserved)relay.releaseSides(['codex','deepseek'],room.id);relay.notify();}}
     return send(404,{error:'接口不存在'});
   }catch(e){const code=['input','config','binding'].includes(e.code)?400:e.code==='not_found'?404:e.code==='busy'?409:503;send(code,{error:safeError(e),code:e.code||'error'});}});
