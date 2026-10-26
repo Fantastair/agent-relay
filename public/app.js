@@ -504,8 +504,8 @@ function roomItem(room) {
     status.append(el('span', 'chip ' + run.tone, run.label));
     if (room.queueLength) status.append(el('span', 'room-queue', '队列 ' + room.queueLength));
     if (Array.isArray(room.sharedWith) && room.sharedWith.length) {
-      const shared = el('span', 'room-shared', '共用会话 · 串行');
-      shared.title = '与「' + room.sharedWith.map(r => r.title).join('」「') + '」共用原生会话';
+      const shared = el('span', 'room-shared', '共用会话 · 需换绑');
+      shared.title = '与「' + room.sharedWith.map(r => r.title).join('」「') + '」共用同一对原生会话；一个话题应当绑定独立的一对，请换绑';
       status.append(shared);
     }
     if (room.paused && room.runState !== 'paused') status.append(el('span', 'room-paused', '已暂停'));
@@ -533,11 +533,7 @@ function roomItem(room) {
     pause.title = room.paused ? '恢复此话题' : '暂停此话题';
     pause.setAttribute('aria-label', pause.title);
     pause.onclick = (e) => { e.stopPropagation(); toggleRoomPause(room); };
-    const independent = el('button', 'icon-btn', '⇄');
-    independent.title = '为该话题创建独立会话';
-    independent.setAttribute('aria-label', independent.title);
-    independent.onclick = (e) => { e.stopPropagation(); useIndependentSession(room); };
-    tools.append(rename, pause, independent, arch, del);
+    tools.append(rename, pause, arch, del);
     item.append(tools);
   }
 
@@ -1506,20 +1502,7 @@ $('provision').addEventListener('click', () => void act(async () => {
   }
 }));
 
-function useIndependentSession(room) {
-  if (!confirm('为「' + (room.title || '此话题') + '」创建一对新的专用会话？\n\n使用该话题自己的工作区；创建后该话题投递保持暂停。')) return;
-  void act(async () => {
-    toast('正在创建专用会话…');
-    const res = await api('provision', {roomId: room.id, workspaceId: room.workspaceId || ''});
-    await refresh();
-    if (res?.roomId || res?.room?.id) {
-      const id = res.roomId || res.room.id;
-      if (id !== S.roomId) await selectRoom(id);
-      else await refresh();
-    }
-    toast('已为「' + (room.title || '此话题') + '」创建独立会话');
-  });
-}
+/* 每个话题固定绑定一对原生会话；不再提供“为话题创建独立会话”的独立入口。 */
 
 /* ---------------- boot ---------------- */
 
