@@ -894,34 +894,40 @@ async function refresh() {
   }
 }
 
-async function selectRoom(roomId) {
-  if (roomId === S.roomId) return;
+function stashContext() {
+  if (!S.roomId) return;
   saveDraft();
-  if (S.roomId) {
-    S.attachmentStore[S.roomId] = S.attachments;
-    S.scrollByRoom[S.roomId] = $('timeline').scrollTop;
-  }
-  const previous = S.roomId;
+  S.attachmentStore[S.roomId] = S.attachments;
+  S.scrollByRoom[S.roomId] = $('timeline').scrollTop;
+}
+
+async function enterRoom(roomId, {refreshFirst = true} = {}) {
+  if (roomId === S.roomId) return;
+  stashContext();
   S.roomId = roomId;
   S.expanded.clear();
   S.signature = '';
   markRead(roomId);
-  closeDrawers();
   S.attachments = S.attachmentStore[roomId] || [];
   renderAttachments();
-  try {
-    if (!S.synthetic) await api('rooms/select', {roomId});
-  } catch (e) {
-    S.roomId = previous;
-    S.signature = '';
-    toast(e.message);
-  }
   restoreDraft();
-  await refresh();
-  const y = S.scrollByRoom[S.roomId];
+  if (refreshFirst) await refresh();
+  const y = S.scrollByRoom[roomId];
   const view = $('timeline');
   if (typeof y === 'number') view.scrollTop = y;
   else view.scrollTop = view.scrollHeight;
+}
+
+async function selectRoom(roomId) {
+  if (roomId === S.roomId) return;
+  try {
+    if (!S.synthetic) await api('rooms/select', {roomId});
+  } catch (e) {
+    toast(e.message);
+    return;
+  }
+  closeDrawers();
+  await enterRoom(roomId);
 }
 
 function draftKey(roomId) { return 'relay.draft.' + roomId; }
@@ -955,13 +961,17 @@ function renameRoom(room) {
   });
 }
 
-function toggleArchive(room) {  void act(async () => {
+function toggleArchive(room) {
+  void act(async () => {
     await api('rooms/update', {roomId: room.id, archived: !room.archived});
     if (!room.archived) {
       S.archivedOpen = true;
       if (room.id === S.roomId) {
         const next = S.rooms.find(r => !r.archived && r.id !== room.id);
-        if (next) { S.roomId = next.id; S.signature = ''; }
+        if (next) {
+          await enterRoom(next.id);
+          return;
+        }
       }
     }
     await refresh();
@@ -988,15 +998,16 @@ function closeDeleteDialog() {
 }
 
 async function newTopic() {  void act(async () => {
-    const res = await api('rooms', {});
+    const sourceRoomId = S.roomId;
+    const res = await api('rooms', {roomId: sourceRoomId});
     if (res?.room?.id) {
-      S.roomId = res.room.id;
-      S.signature = '';
-      S.expanded.clear();
       if (res.warning) toast(res.warning);
+      closeDrawers();
+      await enterRoom(res.room.id);
+    } else {
+      closeDrawers();
+      await refresh();
     }
-    closeDrawers();
-    await refresh();
     toast('已新建话题：只分开中转记录，原生会话仍保留上下文；投递已暂停');
   });
 }
@@ -1162,15 +1173,17 @@ function renderAttachments() {
 }
 
 async function addFiles(fileList) {
-  const files = [...fileList].filter(f => f.type.startsWith('image/')).slice(0, MAX_ATTACH - S.attachments.length);
+  const roomId = S.roomId;
+  const target = S.attachments;
+  const files = [...fileList].filter(f => f.type.startsWith('image/')).slice(0, MAX_ATTACH - target.length);
   for (const file of files) {
     const item = {localUrl: URL.createObjectURL(file), status: 'compressing'};
-    S.attachments.push(item);
-    renderAttachments();
+    target.push(item);
+    if (S.roomId === roomId) renderAttachments();
     try {
       const {dataUrl} = await compressImage(file);
       item.status = 'uploading';
-      renderAttachments();
+      if (S.roomId === roomId) renderAttachments();
       const res = await api('image', {dataUrl});
       item.id = res.image.id;
       item.url = res.image.url || ('/api/image/' + res.image.id);
@@ -1180,7 +1193,7 @@ async function addFiles(fileList) {
       item.error = e.message;
       toast('图片上传失败：' + e.message);
     }
-    renderAttachments();
+    if (S.roomId === roomId) renderAttachments();
   }
 }
 
@@ -1471,14 +1484,15 @@ $('provision').addEventListener('click', () => void act(async () => {
 }));
 
 function useIndependentSession(room) {
-  if (!confirm('为「' + (room.title || '此话题') + '」创建一对新的专用会话？\n\n使用当前工作区；创建后该话题投递保持暂停。')) return;
+  if (!confirm('为「' + (room.title || '此话题') + '」创建一对新的专用会话？\n\n使用该话题自己的工作区；创建后该话题投递保持暂停。')) return;
   void act(async () => {
     toast('正在创建专用会话…');
-    const res = await api('provision', {roomId: room.id, workspaceId: S.state?.settings?.workspaceId || ''});
+    const res = await api('provision', {roomId: room.id, workspaceId: room.workspaceId || ''});
     await refresh();
     if (res?.roomId || res?.room?.id) {
       const id = res.roomId || res.room.id;
       if (id !== S.roomId) await selectRoom(id);
+      else await refresh();
     }
     toast('已为「' + (room.title || '此话题') + '」创建独立会话');
   });

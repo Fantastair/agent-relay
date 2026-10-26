@@ -476,9 +476,9 @@ async function mail() {
 async function ready() {
   const side = sideOf(flag('as'));
   const {st, room} = await resolveRoom(typeof flag('room') === 'string' ? flag('room') : null, {required: true});
-  const sessionId = (typeof flag('session') === 'string' && flag('session')) || st.settings?.[side + 'Id'];
+  const sessionId = (typeof flag('session') === 'string' && flag('session')) || room?.[side === 'codex' ? 'codexId' : 'deepseekId'];
   const version = (typeof flag('version') === 'string' && flag('version')) || '1.0.0';
-  if (!sessionId) throw new Error('缺少会话 ID：用 --session 指定，或先绑定');
+  if (!sessionId) throw new Error('缺少会话 ID：该话题尚未绑定 ' + side + '，或先用 --session 指定');
   if (!room) throw new Error('缺少话题 ID：用 --room 指定');
   const res = await api('/api/protocol/ready', {side, sessionId, version, roomId: room.id});
   console.log(JSON.stringify(res));
