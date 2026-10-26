@@ -300,8 +300,19 @@ function applyState(st) {
   S.rooms = hasRooms ? st.rooms : synthRooms(st);
 
   // 服务端返回的 roomId 是权威值：话题被别处删除时，不能回退到列表第一项。
+  const previousRoomId = S.roomId;
   const candidates = [S.roomId, st.roomId, st.settings?.roomId, st.activeRoomId];
   S.roomId = candidates.find(id => id && S.rooms.some(r => r.id === id)) || S.rooms[0].id;
+
+  // 正在看的话题被别处删除了：丢弃它的草稿/附件，恢复目标话题自己的上下文，
+  // 否则下一次保存会把已删话题的草稿写进目标话题。
+  if (previousRoomId && previousRoomId !== S.roomId && !S.rooms.some(r => r.id === previousRoomId)) {
+    try { localStorage.removeItem(draftKey(previousRoomId)); } catch {}
+    delete S.attachmentStore[previousRoomId];
+    S.attachments = S.attachmentStore[S.roomId] || [];
+    renderAttachments();
+    restoreDraft();
+  }
 
   S.messages = (st.messages || []).filter(m => !m.roomId || m.roomId === S.roomId);
   S.deliveries = (st.deliveries || []).filter(d => !d.roomId || d.roomId === S.roomId);
@@ -1391,11 +1402,21 @@ $('delete-confirm').addEventListener('click', () => void act(async () => {
     await api('rooms/delete', {roomId: room.id});
     const wasViewing = S.roomId === room.id;
     closeDeleteDialog();
+    try { localStorage.removeItem(draftKey(room.id)); } catch {}
+    delete S.attachmentStore[room.id];
     if (wasViewing) {
-      S.roomId = S.activeRoomId;
-      S.signature = '';
+      const next = S.rooms.find(r => r.id !== room.id && !r.archived)
+        || S.rooms.find(r => r.id !== room.id)
+        || null;
+      if (next) {
+        await enterRoom(next.id);
+      } else {
+        S.signature = '';
+        await refresh();
+      }
+    } else {
+      await refresh();
     }
-    await refresh();
     toast('已删除话题「' + (room.title || '未命名') + '」');
   } finally {
     $('delete-confirm').disabled = false;
