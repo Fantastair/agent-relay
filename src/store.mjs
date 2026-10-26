@@ -24,6 +24,7 @@ export class Store{
       this.db.exec(`CREATE TABLE IF NOT EXISTS message_events(seq INTEGER PRIMARY KEY AUTOINCREMENT,message_id TEXT NOT NULL UNIQUE REFERENCES messages(id));
         INSERT OR IGNORE INTO message_events(message_id) SELECT id FROM messages ORDER BY created_at,rowid;
         CREATE TRIGGER IF NOT EXISTS message_event_insert AFTER INSERT ON messages BEGIN INSERT OR IGNORE INTO message_events(message_id) VALUES(NEW.id); END;`);
+      this.db.exec(`CREATE TABLE IF NOT EXISTS deleted_relay_refs(kind TEXT NOT NULL,ref TEXT NOT NULL,side TEXT NOT NULL DEFAULT '',session_id TEXT NOT NULL DEFAULT '',PRIMARY KEY(kind,ref,side,session_id));`);
       this.db.exec('CREATE INDEX IF NOT EXISTS message_room ON messages(room_id,created_at);CREATE INDEX IF NOT EXISTS delivery_room ON deliveries(room_id,side,status);CREATE INDEX IF NOT EXISTS log_room ON logs(room_id,id)');
       this.db.prepare("UPDATE deliveries SET status='unknown',error='服务重启时投递尚未确认，正在回查原生记录',updated_at=? WHERE status='sending'").run(Date.now());
       this.db.prepare("UPDATE batches SET status='unknown',error='服务重启时整批投递尚未确认，正在回查原生记录',updated_at=? WHERE status='sending'").run(Date.now());
@@ -40,6 +41,40 @@ export class Store{
   activateRoom(roomId){const room=this.requireRoom(roomId),now=Date.now();this.db.prepare('UPDATE rooms SET archived_at=NULL,updated_at=? WHERE id=?').run(now,roomId);this.set('activeRoomId',roomId);this.set('selectedRoomId',roomId);this.set('codexId',room.codexId);this.set('deepseekId',room.deepseekId);this.set('workspaceId',room.workspaceId);this.set('paused',true);return this.room(roomId);}
   renameRoom(roomId,title){this.requireRoom(roomId);this.db.prepare('UPDATE rooms SET title=?,updated_at=? WHERE id=?').run(title,Date.now(),roomId);return this.room(roomId);}
   archiveRoom(roomId,archived){this.requireRoom(roomId);this.db.prepare('UPDATE rooms SET archived_at=?,updated_at=? WHERE id=?').run(archived?Date.now():null,Date.now(),roomId);return this.room(roomId);}
+  deletedRef(kind,ref,side='',sessionId=''){return typeof ref==='string'&&!!this.db.prepare('SELECT 1 FROM deleted_relay_refs WHERE kind=? AND ref=? AND side=? AND session_id=?').get(kind,ref,side,sessionId);}
+  deleteRoom(roomId){return this.transaction(()=>{
+    if(typeof roomId!=='string'||!roomId||roomId.length>256)throw new RelayError('请选择有效的话题','input');
+    if(!this.room(roomId))throw new RelayError('话题不存在，可能已经删除，请刷新列表','not_found');
+    const activeRoomId=this.activeRoomId();
+    if(roomId===activeRoomId)throw new RelayError('当前投递话题不能删除，请先新建或继续其他话题','busy');
+    if(this.db.prepare("SELECT 1 FROM deliveries WHERE room_id=? AND status NOT IN ('completed','cancelled') LIMIT 1").get(roomId)||this.db.prepare("SELECT 1 FROM batches WHERE room_id=? AND status NOT IN ('completed','cancelled') LIMIT 1").get(roomId))throw new RelayError('该话题存在未完成投递，请先完成、取消或处理后再删除','busy');
+    // Keep opaque identities, never message content, so late native receipts
+    // cannot resurrect deleted conversations after their delivery rows are gone.
+    const remember=this.db.prepare('INSERT OR IGNORE INTO deleted_relay_refs(kind,ref,side,session_id) VALUES(?,?,?,?)');
+    for(const row of this.db.prepare('SELECT id FROM messages WHERE room_id=?').all(roomId))remember.run('message',row.id,'','');
+    for(const row of this.db.prepare('SELECT id,side,session_id,receipt FROM deliveries WHERE room_id=?').all(roomId)){
+      const receipt=row.receipt?JSON.parse(row.receipt):null;
+      remember.run('request',row.id,row.side,row.session_id||'');
+      if(receipt?.requestId)remember.run('request',receipt.requestId,row.side,row.session_id||'');
+      if(receipt?.nativeTurnId)remember.run('turn',receipt.nativeTurnId,row.side,row.session_id||'');
+    }
+    for(const row of this.db.prepare('SELECT id,side,session_id,receipt FROM batches WHERE room_id=?').all(roomId)){
+      const receipt=row.receipt?JSON.parse(row.receipt):null;
+      remember.run('batch',row.id,'','');remember.run('request',row.id,row.side,row.session_id);
+      if(receipt?.requestId)remember.run('request',receipt.requestId,row.side,row.session_id);
+      if(receipt?.nativeTurnId)remember.run('turn',receipt.nativeTurnId,row.side,row.session_id);
+    }
+    this.db.prepare('DELETE FROM deliveries WHERE room_id=?').run(roomId);
+    this.db.prepare('DELETE FROM batches WHERE room_id=?').run(roomId);
+    this.db.prepare('DELETE FROM message_events WHERE message_id IN (SELECT id FROM messages WHERE room_id=?)').run(roomId);
+    this.db.prepare('DELETE FROM roots WHERE id IN (SELECT root_id FROM messages WHERE room_id=?) AND NOT EXISTS (SELECT 1 FROM messages WHERE root_id=roots.id AND room_id!=?)').run(roomId,roomId);
+    this.db.prepare('DELETE FROM messages WHERE room_id=?').run(roomId);
+    this.db.prepare('DELETE FROM logs WHERE room_id=?').run(roomId);
+    this.db.prepare('UPDATE rooms SET parent_id=NULL WHERE parent_id=?').run(roomId);
+    this.db.prepare('DELETE FROM rooms WHERE id=?').run(roomId);
+    if(this.get('selectedRoomId',activeRoomId)===roomId)this.set('selectedRoomId',activeRoomId);
+    return {ok:true,roomId,selectedRoomId:this.get('selectedRoomId',activeRoomId)};
+  });}
   log(kind,text,roomId=this.activeRoomId()){this.db.prepare('INSERT INTO logs(kind,text,created_at,room_id) VALUES(?,?,?,?)').run(kind,text,Date.now(),roomId);}
   root(rootId,maxTurns){this.db.prepare('INSERT OR IGNORE INTO roots VALUES(?,?)').run(rootId,maxTurns);}
   addMessage({id:messageId=id(),sender,text,replyTo=null,rootId=messageId,hop=0,nativeKey=null,meta={},roomId}){const parent=replyTo?this.message(replyTo):null,root=this.message(rootId);roomId=roomId||parent?.roomId||root?.roomId||this.activeRoomId();this.requireRoom(roomId);if((parent&&parent.roomId!==roomId)||(root&&root.roomId!==roomId))throw new RelayError('回复和原消息必须属于同一话题','input');const now=Date.now(),result=this.db.prepare('INSERT OR IGNORE INTO messages(id,sender,text,reply_to,root_id,hop,native_key,meta,created_at,room_id) VALUES(?,?,?,?,?,?,?,?,?,?)').run(messageId,sender,text,replyTo,rootId,hop,nativeKey,JSON.stringify(meta),now,roomId);if(result.changes&&!meta.silent)this.db.prepare('UPDATE rooms SET updated_at=? WHERE id=?').run(now,roomId);return this.message(messageId);}
@@ -78,7 +113,8 @@ export class Store{
     let cursor;if(/^\d+$/.test(String(after)))cursor=Number(after);else if(typeof after==='string'){const known=this.db.prepare('SELECT seq FROM message_events WHERE message_id=?').get(after);if(!known)throw new RelayError('收件箱游标消息不存在，请明确重新定位','input');cursor=Number(known.seq);}
     if(!Number.isSafeInteger(cursor)||cursor<0)throw new RelayError('收件箱游标无效','input');
     if(!all){roomId=roomId||this.activeRoomId();this.requireRoom(roomId);}
-    const latest=Number(this.db.prepare('SELECT coalesce(max(seq),0) AS seq FROM message_events').get().seq);
+    // AUTOINCREMENT's high-water mark survives removal of the latest event.
+    const latest=Number(this.db.prepare("SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name='message_events'),0) AS seq").get().seq);
     if(cursor>latest)throw new RelayError('游标超出当前历史范围，请明确重新定位','input');
     const rows=this.db.prepare(`SELECT m.*,e.seq AS sequence FROM message_events e JOIN messages m ON m.id=e.message_id WHERE e.seq>? AND m.sender!=? AND coalesce(json_extract(m.meta,\'$.silent\'),0)!=1${all?'':' AND m.room_id=?'} ORDER BY e.seq LIMIT ?`).all(cursor,side,...(all?[]:[roomId]),limit+1);
     const hasMore=rows.length>limit,messages=rows.slice(0,limit).map(row=>({...this.decodeMessage(row),sequence:Number(row.sequence)}));

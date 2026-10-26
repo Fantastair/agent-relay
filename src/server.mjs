@@ -25,7 +25,7 @@ export async function makeService({dataDir=path.join(root,'data'),config={},adap
     res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('X-Frame-Options','DENY');res.setHeader('Referrer-Policy','no-referrer');res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data: blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
     const url=new URL(req.url,`http://${host}`),pathname=url.pathname;
     if(req.method==='GET'&&['/','/app.js','/style.css'].includes(pathname)){if(pathname==='/')res.setHeader('Set-Cookie',`${sessionCookie}=${key}; HttpOnly; SameSite=Strict; Path=/`);const name=pathname==='/'?'index.html':pathname.slice(1);const body=await readFile(path.join(root,'public',name));res.writeHead(200,{'content-type':name.endsWith('.html')?'text/html; charset=utf-8':name.endsWith('.js')?'text/javascript; charset=utf-8':'text/css; charset=utf-8','cache-control':'no-cache'});return res.end(body);}
-    if(pathname==='/api/health'&&req.method==='GET')return send(200,{ok:true,version:'0.1.0',features:['rooms','message-attribution-v1','inbox-cursor-v1','quota-snapshot-v1','quota-live-v1','protocol-ready-v1','batch-delivery-v1','image-attachments-v1','image-capabilities-v1','silent-reply-v1']});
+    if(pathname==='/api/health'&&req.method==='GET')return send(200,{ok:true,version:'0.1.0',features:['rooms','room-delete-v1','message-attribution-v1','inbox-cursor-v1','quota-snapshot-v1','quota-live-v1','protocol-ready-v1','batch-delivery-v1','image-attachments-v1','image-capabilities-v1','silent-reply-v1']});
     const bearer=(req.headers.authorization||'').replace(/^Bearer /,''),cookie=(req.headers.cookie||'').match(new RegExp(`(?:^|;\\s*)${sessionCookie}=([a-f0-9]+)`))?.[1];const equal=v=>typeof v==='string'&&v.length===key.length&&timingSafeEqual(Buffer.from(v),Buffer.from(key));const hasBearer=equal(bearer);if(!hasBearer&&!equal(cookie))return send(401,{error:'请从本机中转台首页访问'});
     if(req.method!=='GET'&&!hasBearer&&(req.headers.origin!==`http://${host}`||req.headers['x-relay-ui']!=='1'))return send(403,{error:'请求来源不匹配'});
     if(req.method==='GET'&&pathname.startsWith('/api/image/')){const {image,bytes}=await images.read(pathname.slice('/api/image/'.length));res.writeHead(200,{'content-type':image.mime,'content-length':bytes.length,'cache-control':'private, max-age=31536000, immutable'});return res.end(bytes);}
@@ -51,6 +51,7 @@ export async function makeService({dataDir=path.join(root,'data'),config={},adap
     if(pathname==='/api/rooms/select'){const room=relay.selectRoom(body.roomId);return send(200,{ok:true,room,warning:room.id!==store.activeRoomId()?'正在浏览历史话题。继续发送前，请点击「继续此话题」恢复它的会话绑定。':undefined});}
     if(pathname==='/api/rooms/activate')return send(200,{ok:true,room:await relay.activateRoom(body.roomId)});
     if(pathname==='/api/rooms/update')return send(200,{ok:true,room:relay.updateRoom(body)});
+    if(pathname==='/api/rooms/delete')return send(200,relay.deleteRoom(body));
     if(pathname==='/api/options'){relay.setOptions(body);return send(200,{ok:true});}
     if(pathname==='/api/resolve'){relay.resolve(body.deliveryId,body.decision,body.confirmed);return send(200,{ok:true});}
     if(pathname==='/api/bind'){const s=await relay.bind(body.side,body.sessionId);return send(200,{id:s.id,title:s.title});}
@@ -64,7 +65,7 @@ export async function makeService({dataDir=path.join(root,'data'),config={},adap
       try{await relay.reserveSides(['codex','deepseek']);reserved=true;relay.assertQueueSettled();await relay.checkRoomBindings(store.requireRoom(store.activeRoomId()));store.set('paused',true);const pair=await provisionNewPair({store,codex:c,deepseek:d,workspaceId:body.workspaceId,title:body.title,defaultWorkspacePath:path.resolve(root,'..')});relay.changedRoom();void catalog.refresh({force:true});return send(200,pair);
       }finally{if(reserved)relay.releaseSides(['codex','deepseek']);provisioning=false;relay.notify();}}
     return send(404,{error:'接口不存在'});
-  }catch(e){const code=['input','config','binding'].includes(e.code)?400:e.code==='busy'?409:503;send(code,{error:safeError(e),code:e.code||'error'});}});
+  }catch(e){const code=['input','config','binding'].includes(e.code)?400:e.code==='not_found'?404:e.code==='busy'?409:503;send(code,{error:safeError(e),code:e.code||'error'});}});
   server.once('listening',()=>{void catalog.refresh();});
   let closing;const service={server,relay,store,catalog,quota,images,key,dataDir,close:()=>closing||=(async()=>{catalog.close();quota.close();await relay.stop();await new Promise(resolve=>server.close(resolve));store.close();})()};return service;
 }
