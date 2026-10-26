@@ -60,16 +60,77 @@ test('round robin at completed delivery boundaries prevents a topic with a backl
   }finally{h.store.close();}
 });
 
-test('partially shared native pairs execute serially, and completion is attributed to the saved topic',async()=>{
+test('legacy shared bindings preserve queued work and in-flight replies but do not accept or dispatch new work',async()=>{
   const h=harness();try{
-    h.relay.setScheduler({limit:4});const a=h.room('a',{codexId:'shared'}),b=h.room('b',{codexId:'shared'});
-    const ma=h.relay.sendUser('A',['codex'],a.id),mb=h.relay.sendUser('B',['deepseek'],b.id);
-    await Promise.all(['codex','deepseek'].map(side=>h.relay.tick(side)));assert.equal(h.sent.length,1);
-    const sentA=h.store.forMessage(ma.id,'codex').status==='running';h.finish(sentA?ma:mb,sentA?'codex':'deepseek');
+    h.relay.setScheduler({limit:4});const a=h.room('a',{codexId:'shared'});
+    const ma=h.relay.sendUser('already sent',['codex'],a.id);h.relay.sendUser('queued before migration',['codex'],a.id);
+    await h.relay.tick('codex');assert.equal(h.sent.length,1);
+    const b=h.room('legacy duplicate',{codexId:'shared'});
+    const mb=h.store.addMessage({sender:'user',text:'legacy queue',roomId:b.id});h.relay.context(b.id).enqueue(mb,'deepseek');
+    assert.throws(()=>h.relay.sendUser('reject new',['deepseek'],b.id),error=>error.code==='binding_conflict');
+    assert.throws(()=>h.relay.forward(ma.id,'deepseek'),error=>error.code==='binding_conflict');
+    h.finish(ma,'codex','late reply without stop marker');
     await Promise.all(['codex','deepseek'].map(side=>h.relay.tick(side)));
-    assert.equal(h.sent.length,2);assert.equal(h.relay.state(a.id).room.sharedWith[0].roomId,b.id);
-    assert.equal(h.store.state(sentA?a.id:b.id).messages.length,2);
+    assert.equal(h.sent.length,1);assert.equal(h.store.forMessage(ma.id,'codex').status,'completed');
+    const state=h.relay.state(a.id);assert.equal(state.room.bindingStatus,'conflict');assert.equal(state.room.runState,'waiting');
+    assert.equal(state.room.sharedWith[0].roomId,b.id);assert.deepEqual(state.room.bindingConflicts,[{side:'codex',roomId:b.id,title:b.title}]);
+    assert.equal(h.store.jobs('deepseek',undefined,a.id).length,0);assert.equal(h.store.forMessage(mb.id,'deepseek').status,'queued');
+    assert.equal(h.store.state(a.id).messages.at(-1).replyTo,ma.id);assert.equal(h.store.roomOptions(a.id).paused,false);
   }finally{h.store.close();}
+});
+
+test('new topics have empty native bindings and cannot inherit skill or image declarations',async()=>{
+  const h=harness();try{
+    const source=h.room('source');h.store.patchRoomOptions(source.id,{maxTurns:12,protocolReady:{codex:{}},imageCapabilities:{deepseek:{}}});
+    const room=await h.relay.createRoom({roomId:source.id,title:'empty'});
+    assert.equal(room.codexId,null);assert.equal(room.deepseekId,null);assert.equal(room.parentId,source.id);
+    assert.equal(h.store.roomOptions(room.id).maxTurns,12);assert.deepEqual(h.store.roomOptions(room.id).protocolReady,{});assert.deepEqual(h.store.roomOptions(room.id).imageCapabilities,{});
+    assert.equal(h.relay.state(room.id).room.bindingStatus,'unbound');assert.equal(h.relay.state(room.id).room.runState,'unbound');
+    assert.throws(()=>h.relay.sendUser('not yet',undefined,room.id),/尚未绑定/);assert.equal(h.store.state(room.id).messages.length,0);
+    await assert.rejects(h.relay.createRoom({roomId:source.id,reuseBindings:true}),/不能复用/);
+    assert.equal(h.store.room(source.id).codexId,source.codexId);assert.equal(h.sent.length,0);
+  }finally{h.store.close();}
+});
+
+test('each native side is exclusive even when its owner is archived',async()=>{
+  const h=harness();try{
+    const owner=h.room('owner'),target=h.room('target');h.relay.updateRoom({roomId:owner.id,archived:true});
+    for(const side of ['codex','deepseek']){
+      const bindings={roomId:target.id,codexId:'available-c',deepseekId:'available-d',[side==='codex'?'codexId':'deepseekId']:owner[side==='codex'?'codexId':'deepseekId']};
+      await assert.rejects(h.relay.bindPair(bindings),error=>error.code==='binding_conflict'&&error.conflict.side===side&&error.conflict.roomId===owner.id);
+      assert.equal(h.store.room(target.id).codexId,target.codexId);assert.equal(h.store.room(target.id).deepseekId,target.deepseekId);
+    }
+    await h.relay.bindPair({roomId:target.id,codexId:target.codexId,deepseekId:target.deepseekId});
+    assert.equal(h.relay.state(target.id).room.bindingStatus,'ready');
+  }finally{h.store.close();}
+});
+
+test('two simultaneous binding requests cannot both claim a native session',async()=>{
+  const h=harness();let release;const wait=new Promise(resolve=>{release=resolve;});let reads=0;
+  try{
+    const a=h.room('a',{codexId:null,deepseekId:null}),b=h.room('b',{codexId:null,deepseekId:null});
+    h.adapters.codex.snapshot=async id=>{reads++;await wait;return {id,state:'idle',turns:[]};};
+    const pending=[a,b].map(room=>h.relay.bindPair({roomId:room.id,codexId:'contested',deepseekId:'d-'+room.id}));
+    await new Promise(resolve=>setImmediate(resolve));assert.equal(reads,2);release();
+    const results=await Promise.allSettled(pending);assert.equal(results.filter(result=>result.status==='fulfilled').length,1);
+    const loser=results.find(result=>result.status==='rejected');assert.equal(loser.reason.code,'binding_conflict');
+    const winner=results.find(result=>result.status==='fulfilled').value;assert.equal(loser.reason.conflict.roomId,winner.roomId);
+    const unchanged=h.store.rooms().find(room=>[a.id,b.id].includes(room.id)&&room.id!==winner.roomId);
+    assert.equal(unchanged.codexId,null);assert.equal(unchanged.deepseekId,null);assert.equal(h.relay.mutations.size,0);
+  }finally{release();h.store.close();}
+});
+
+test('legacy duplicate bindings survive reopen without modifying records or choosing an owner',async()=>{
+  const dir=await mkdtemp(path.join(tmpdir(),'relay-binding-migration-')),file=path.join(dir,'relay.sqlite');let h=harness(file);
+  try{
+    const a=h.room('a',{codexId:'legacy'}),b=h.room('b',{codexId:'legacy'}),message=h.store.addMessage({sender:'user',text:'keep history',roomId:a.id});
+    h.store.close();h=harness(file);
+    for(const room of [a,b]){assert.equal(h.store.room(room.id).codexId,'legacy');assert.equal(h.relay.state(room.id).room.bindingStatus,'conflict');}
+    assert.equal(h.store.message(message.id).text,'keep history');assert.equal(h.store.roomOptions(a.id).paused,false);
+    await h.relay.tick('codex');assert.equal(h.sent.length,0);
+    await h.relay.bindPair({roomId:b.id,codexId:'new-c',deepseekId:b.deepseekId});
+    assert.equal(h.relay.state(a.id).room.bindingStatus,'ready');assert.equal(h.relay.state(b.id).room.bindingStatus,'ready');
+  }finally{h.store.close();await rm(dir,{recursive:true,force:true});}
 });
 
 test('per-topic pause and the global gate preserve independent flags and permit queuing',async()=>{
@@ -177,5 +238,30 @@ test('provisioning independent sessions updates the requested topic without bein
     assert.equal(service.store.rooms().length,2);assert.equal(service.store.room(target).codexId,'new-independent-c');assert.equal(service.store.room(target).deepseekId,'new-independent-d');
     assert.equal(service.store.room(other.id).codexId,'other-c');assert.equal(service.store.forMessage(pending.id,'codex').status,'queued');
     assert.equal(service.store.roomOptions(target).provisionDraft,null);assert.equal(service.store.roomOptions(target).paused,true);
+  }finally{await service.close();h.store.close();await rm(dir,{recursive:true,force:true});}
+});
+
+test('HTTP binding conflicts identify the occupying topic, including archives, without changing either binding',async()=>{
+  const h=harness(),dir=await mkdtemp(path.join(tmpdir(),'relay-binding-http-')),service=await makeService({dataDir:dir,adapters:h.adapters});
+  await new Promise(resolve=>service.server.listen(0,'127.0.0.1',resolve));const base='http://127.0.0.1:'+service.server.address().port;
+  try{
+    const owner=service.store.room(service.store.activeRoomId());service.store.bindRoom(owner.id,{codexId:'owned-c',deepseekId:'owned-d'});service.store.renameRoom(owner.id,'已归档项目');service.store.archiveRoom(owner.id,true);
+    const cookie=(await fetch(base)).headers.get('set-cookie').split(';')[0],headers={cookie,origin:base,'x-relay-ui':'1','content-type':'application/json'};
+    const post=(route,body)=>fetch(base+'/api/'+route,{method:'POST',headers,body:JSON.stringify(body)});
+    const created=await post('rooms',{roomId:owner.id,title:'new'});assert.equal(created.status,200);const target=(await created.json()).room;
+    assert.equal(target.codexId,null);assert.equal(target.deepseekId,null);
+    assert.equal((await post('message',{roomId:target.id,text:'unbound'})).status,400);
+    for(const side of ['codex','deepseek']){
+      const response=await post('bind-pair',{roomId:target.id,codexId:side==='codex'?'owned-c':'free-c',deepseekId:side==='deepseek'?'owned-d':'free-d'});
+      assert.equal(response.status,409);const error=await response.json();assert.equal(error.code,'binding_conflict');assert.deepEqual(error.conflict,{side,roomId:owner.id,title:'已归档项目'});
+    }
+    assert.equal(service.store.room(target.id).codexId,null);assert.equal(service.store.room(owner.id).codexId,'owned-c');
+    assert.equal((await post('rooms',{roomId:owner.id,reuseBindings:true})).status,400);
+    // A pre-upgrade duplicate is reported, kept intact, and cannot create a new message.
+    const legacy=service.store.createRoom({title:'legacy',codexId:'owned-c',deepseekId:'old-d'});
+    const rejected=await post('message',{roomId:legacy.id,text:'blocked'});assert.equal(rejected.status,409);assert.equal((await rejected.json()).conflict.roomId,owner.id);
+    const view=await (await fetch(base+'/api/state?roomId='+legacy.id,{headers:{cookie}})).json();
+    assert.equal(view.room.bindingStatus,'conflict');assert.equal(view.room.codexId,'owned-c');assert.equal(view.messages.length,0);
+    assert(view.rooms.some(room=>room.id===owner.id&&room.archived));
   }finally{await service.close();h.store.close();await rm(dir,{recursive:true,force:true});}
 });

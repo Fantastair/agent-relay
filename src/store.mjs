@@ -41,7 +41,14 @@ export class Store{
   roomOptions(roomId){this.requireRoom(roomId);const row=this.db.prepare('SELECT value FROM room_options WHERE room_id=?').get(roomId);return {paused:true,mode:'auto',maxTurns:6,...(row?JSON.parse(row.value):{})};}
   writeRoomOptions(roomId,options){this.requireRoom(roomId);this.db.prepare('INSERT INTO room_options(room_id,value) VALUES(?,?) ON CONFLICT(room_id) DO UPDATE SET value=excluded.value').run(roomId,JSON.stringify(options));}
   patchRoomOptions(roomId,changes){this.writeRoomOptions(roomId,{...this.roomOptions(roomId),...changes});return this.roomOptions(roomId);}
-  bindRoom(roomId,{codexId,deepseekId,workspaceId}){this.requireRoom(roomId);this.db.prepare('UPDATE rooms SET codex_id=?,deepseek_id=?,workspace_id=?,updated_at=? WHERE id=?').run(codexId??null,deepseekId??null,workspaceId??null,Date.now(),roomId);return this.room(roomId);}
+  bindingConflicts(roomId,bindings=this.requireRoom(roomId)){
+    return [['codex','codexId','codex_id'],['deepseek','deepseekId','deepseek_id']].flatMap(([side,key,column])=>bindings[key]?this.db.prepare(`SELECT id,title FROM rooms WHERE id<>? AND ${column}=? ORDER BY created_at,rowid`).all(roomId,bindings[key]).map(room=>({side,roomId:room.id,title:room.title})):[]);
+  }
+  assertBindingAvailable(roomId,bindings){
+    const conflict=this.bindingConflicts(roomId,bindings)[0];
+    if(conflict){const error=new RelayError(`${conflict.side==='codex'?'Codex':'DeepSeek'} 会话已被「${conflict.title}」占用，请选择未被占用的会话`,'binding_conflict');error.conflict=conflict;throw error;}
+  }
+  bindRoom(roomId,{codexId,deepseekId,workspaceId}){this.requireRoom(roomId);this.assertBindingAvailable(roomId,{codexId,deepseekId});this.db.prepare('UPDATE rooms SET codex_id=?,deepseek_id=?,workspace_id=?,updated_at=? WHERE id=?').run(codexId??null,deepseekId??null,workspaceId??null,Date.now(),roomId);return this.room(roomId);}
   requireRoom(roomId){const room=this.room(roomId);if(!room)throw new RelayError('话题不存在，请刷新列表','input');return room;}
   createRoom({title='新话题',kind='binding',parentId=null,codexId=null,deepseekId=null,workspaceId=null}={}){const roomId=id(),now=Date.now();this.db.prepare('INSERT INTO rooms(id,title,codex_id,deepseek_id,workspace_id,created_at,updated_at,kind,parent_id) VALUES(?,?,?,?,?,?,?,?,?)').run(roomId,title,codexId,deepseekId,workspaceId,now,now,kind,parentId);return this.room(roomId);}
   activateRoom(roomId){const room=this.requireRoom(roomId),now=Date.now();this.db.prepare('UPDATE rooms SET archived_at=NULL,updated_at=? WHERE id=?').run(now,roomId);this.set('activeRoomId',roomId);this.set('selectedRoomId',roomId);this.set('codexId',room.codexId);this.set('deepseekId',room.deepseekId);this.set('workspaceId',room.workspaceId);this.set('paused',true);return this.room(roomId);}

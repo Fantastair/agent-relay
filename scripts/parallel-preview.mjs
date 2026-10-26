@@ -11,12 +11,14 @@ const adapters=Object.fromEntries(['codex','deepseek'].map(side=>[side,{
 }]));
 const service=await makeService({dataDir:path.join(root,'data-dev','parallel-preview'),adapters});
 if(!service.store.get('parallelPreviewSeeded',false)){
-  const names=['独立话题 A','独立话题 B','独立话题 C','共用会话话题','暂停话题','归档话题'];
+  const names=['独立话题 A','独立话题 B','独立话题 C','历史冲突（需换绑）','暂停话题','归档话题'];
   for(let i=0;i<names.length;i++){
-    const room=i===0?service.store.room(service.store.activeRoomId()):service.store.createRoom({title:names[i]});
-    service.store.renameRoom(room.id,names[i]);service.store.bindRoom(room.id,{codexId:'mock-c-'+(i===3?0:i),deepseekId:'mock-d-'+i,workspaceId:'mock-workspace'});
+    const binding={codexId:'mock-c-'+(i===3?0:i),deepseekId:'mock-d-'+i,workspaceId:'mock-workspace'};
+    // The duplicate is an intentional pre-upgrade fixture, not a binding API path.
+    const room=i===0?service.store.room(service.store.activeRoomId()):service.store.createRoom({title:names[i],...binding});
+    service.store.renameRoom(room.id,names[i]);if(i===0)service.store.bindRoom(room.id,binding);
     service.store.writeRoomOptions(room.id,{paused:i===4,mode:'auto',maxTurns:6});
-    if(i===5)service.store.archiveRoom(room.id,true);else service.relay.sendUser('隔离预览任务 '+names[i],undefined,room.id);
+    if(i===5)service.store.archiveRoom(room.id,true);else if(!service.store.bindingConflicts(room.id).length)service.relay.sendUser('隔离预览任务 '+names[i],undefined,room.id);
   }
   service.store.set('parallelPreviewSeeded',true);
 }

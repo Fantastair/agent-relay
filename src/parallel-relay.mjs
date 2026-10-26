@@ -19,7 +19,7 @@ function scopedStore(owner,roomId){
         if(['codexId','deepseekId','workspaceId'].includes(name))return root.room(roomId)?.[name]??fallback;
         if(localKeys.has(name)){
           const value=root.roomOptions(roomId)[name]??fallback;
-          if(name==='mode'&&root.room(roomId)?.archived)return 'manual';
+          if(name==='mode'&&(root.room(roomId)?.archived||!root.room(roomId)?.codexId||!root.room(roomId)?.deepseekId||root.bindingConflicts(roomId).length))return 'manual';
           if(name==='paused'&&owner.engines.get(roomId)?.dispatching)return !!value||owner.store.get('pausedAll',false)||!owner.claim(roomId);
           return value;
         }
@@ -68,13 +68,13 @@ export class ParallelRelay{
         return {...snapshot,turns:snapshot.turns.filter(turn=>this.belongs(turn,side,sessionId,roomId))};
       },
       send:async(sessionId,text,requestId)=>{
-        if(this.closed||this.mutations.has(roomId)||this.store.get('pausedAll',false)||this.store.roomOptions(roomId).paused||!this.owns(roomId))throw new RelayError('话题等待投递槽位','busy');
+        if(this.closed||this.mutations.has(roomId)||this.store.get('pausedAll',false)||this.store.roomOptions(roomId).paused||this.store.bindingConflicts(roomId).length||!this.owns(roomId))throw new RelayError('话题等待投递槽位或需要换绑','busy');
         if(sessionId!==this.sessionId(side,roomId))throw new RelayError('会话绑定已变化','binding');
         return this.adapters[side].send(sessionId,text,requestId);
       },
     }]));
     engine=new Relay(scopedStore(this,roomId),native,{images:this.images});engine.onChange=()=>this.notify();
-    engine.assertActiveRoom=target=>{if(target!==roomId||this.requireRoom(roomId).archived)throw new RelayError('归档话题只读，请先恢复','input');if(this.mutations.has(roomId))throw new RelayError('正在配置该话题','busy');};
+    engine.assertActiveRoom=target=>{const room=this.requireRoom(roomId);if(target!==roomId||room.archived)throw new RelayError('归档话题只读，请先恢复','input');if(this.mutations.has(roomId))throw new RelayError('正在配置该话题','busy');this.store.assertBindingAvailable(roomId,room);if(!room.codexId||!room.deepseekId)throw new RelayError('此话题尚未绑定完整的一对会话，请先连接 Codex 和 DeepSeek','binding');};
     this.engines.set(roomId,engine);return engine;
   }
   sessionId(side,roomId=this.defaultRoom()){return this.store.room(roomId)?.[bindingKey(side)]||null;}
@@ -109,13 +109,13 @@ export class ParallelRelay{
   compareRooms(a,b){const order=roomId=>Number(this.store.db.prepare("SELECT min(rowid) AS n FROM deliveries WHERE room_id=? AND status='queued'").get(roomId).n??Number.MAX_SAFE_INTEGER);return (this.lastServed.get(a.id)||0)-(this.lastServed.get(b.id)||0)||order(a.id)-order(b.id)||a.createdAt-b.createdAt||a.id.localeCompare(b.id);}
   owns(roomId){return this.leases.has(roomId)&&![...this.leases].some(other=>other!==roomId&&this.shares(roomId,other));}
   eligible(room){
-    if(room.archived||this.mutations.has(room.id)||this.store.roomOptions(room.id).paused)return false;
+    if(room.archived||!room.codexId||!room.deepseekId||this.store.bindingConflicts(room.id).length||this.mutations.has(room.id)||this.store.roomOptions(room.id).paused)return false;
     if(SIDES.some(side=>this.store.jobs(side,['unknown','blocked','failed'],room.id).length))return false;
     return SIDES.some(side=>this.store.jobs(side,['queued'],room.id).length&&this.sessionId(side,room.id)&&this.sessionHealth.get(resourceKey(side,this.sessionId(side,room.id)))?.ok===true&&this.sessionHealth.get(resourceKey(side,this.sessionId(side,room.id)))?.state!=='running');
   }
   claim(roomId){
     this.cleanLeases();
-    if(this.store.get('pausedAll',false)||this.mutations.has(roomId))return false;
+    if(this.store.get('pausedAll',false)||this.mutations.has(roomId)||this.store.bindingConflicts(roomId).length)return false;
     if(SIDES.some(side=>this.store.jobs(side,['unknown','blocked','failed'],roomId).length))return false;
     const limit=this.store.get('concurrencyLimit',2);
     if(this.runningRooms().length>limit)return false;
@@ -181,12 +181,13 @@ export class ParallelRelay{
   async checkRoomBindings(room){return this.engine(room.id).checkRoomBindings(room);}
   changedRoom(){this.notify();}
   selectRoom(roomId){const room=this.requireRoom(roomId);this.store.set('selectedRoomId',room.id);this.notify();return room;}
-  async createRoom({title,reuseBindings=true,roomId=this.defaultRoom()}={}){
+  async createRoom({title,reuseBindings=false,roomId=this.defaultRoom()}={}){
     const previous=this.requireRoom(roomId);title=this.engine(roomId).roomTitle(title);
     if(typeof reuseBindings!=='boolean')throw new RelayError('话题绑定选项不正确','input');
+    if(reuseBindings)throw new RelayError('一个话题必须使用独立的一对会话，新话题不能复用来源绑定','input');
     const room=this.store.transaction(()=>{
-      const created=this.store.createRoom({title,kind:'topic',parentId:previous.id,...(reuseBindings?{codexId:previous.codexId,deepseekId:previous.deepseekId,workspaceId:previous.workspaceId}:{})});
-      this.store.writeRoomOptions(created.id,{...this.store.roomOptions(previous.id),paused:true,provisionDraft:null,channelHistory:[]});this.store.set('selectedRoomId',created.id);return created;
+      const created=this.store.createRoom({title,kind:'topic',parentId:previous.id,workspaceId:previous.workspaceId});
+      this.store.writeRoomOptions(created.id,{...this.store.roomOptions(previous.id),paused:true,protocolReady:{},imageCapabilities:{},provisionDraft:null,channelHistory:[]});this.store.set('selectedRoomId',created.id);return created;
     });this.notify();return room;
   }
   async activateRoom(roomId){const room=this.requireRoom(roomId);this.store.transaction(()=>{this.store.archiveRoom(roomId,false);this.store.patchRoomOptions(roomId,{paused:true});this.store.set('selectedRoomId',roomId);});this.notify();return this.store.room(room.id);}
@@ -214,13 +215,15 @@ export class ParallelRelay{
   async bindPair({roomId=this.defaultRoom(),codexId,deepseekId,title}={}){
     const room=this.requireRoom(roomId);if([codexId,deepseekId].some(v=>typeof v!=='string'||!v.trim()||v.length>256))throw new RelayError('请分别选择有效的会话 ID','input');
     if(room.archived)throw new RelayError('请先恢复归档话题','input');if(title!==undefined)title=this.engine(roomId).roomTitle(title);
+    this.store.assertBindingAvailable(roomId,{codexId:codexId.trim(),deepseekId:deepseekId.trim()});
     await this.reserveSides(SIDES,roomId);try{
       this.assertQueueSettled(roomId);
       for(const side of SIDES){const oldSession=room[bindingKey(side)],nextSession=side==='codex'?codexId.trim():deepseekId.trim();if(oldSession&&oldSession!==nextSession){const previous=await this.adapters[side].snapshot(oldSession);if(previous.state==='running')throw new RelayError('原绑定的会话仍在工作，请完成后再换绑','busy');this.ingest(side,oldSession,previous,roomId);}}
       const snapshots=await Promise.all(SIDES.map(side=>this.adapters[side].snapshot(side==='codex'?codexId.trim():deepseekId.trim())));
       if(snapshots.some(snapshot=>snapshot.state==='running'))throw new RelayError('指定的原生会话正在工作，请空闲后再绑定','busy');
-      const known=Object.fromEntries(SIDES.map((side,i)=>[side,this.store.rooms().some(other=>other.id!==roomId&&other[bindingKey(side)]===(i===0?codexId.trim():deepseekId.trim()))]));
-      this.store.transaction(()=>{this.store.bindRoom(roomId,{...room,codexId:codexId.trim(),deepseekId:deepseekId.trim()});this.store.patchRoomOptions(roomId,{paused:true,protocolReady:{},imageCapabilities:{}});if(title)this.store.renameRoom(roomId,title);this.engine(roomId).baseline(this.store.room(roomId),Object.fromEntries(SIDES.map((side,i)=>[side,known[side]?{turns:[]}:snapshots[i]])));});
+      // bindRoom checks ownership again inside this transaction after all
+      // native reads have finished; concurrent requests cannot both win.
+      this.store.transaction(()=>{this.store.bindRoom(roomId,{...room,codexId:codexId.trim(),deepseekId:deepseekId.trim()});this.store.patchRoomOptions(roomId,{paused:true,protocolReady:{},imageCapabilities:{}});if(title)this.store.renameRoom(roomId,title);this.engine(roomId).baseline(this.store.room(roomId),Object.fromEntries(SIDES.map((side,i)=>[side,snapshots[i]])));});
       this.notify();return {roomId,codexId:codexId.trim(),deepseekId:deepseekId.trim(),room:this.store.room(roomId)};
     }finally{this.releaseSides(SIDES,roomId);}
   }
@@ -253,8 +256,9 @@ export class ParallelRelay{
   describe(room){
     const options=this.store.roomOptions(room.id),health=this.roomHealth(room),queued=SIDES.flatMap(side=>this.store.jobs(side,['queued'],room.id)),flight=this.flights(room.id);
     const waiting=SIDES.some(side=>this.store.jobs(side,['unknown','blocked','failed'],room.id).length)||this.store.db.prepare("SELECT json_extract(meta,'$.wait') AS waiting FROM messages WHERE room_id=? AND coalesce(json_extract(meta,'$.silent'),0)!=1 ORDER BY created_at DESC,rowid DESC LIMIT 1").get(room.id)?.waiting;
-    const runState=room.archived?'idle':!room.codexId&&!room.deepseekId?'unbound':flight.some(d=>d.status!=='unknown')?'running':waiting?'waiting':options.paused?'paused':queued.length?'queued':'idle';
-    return {...room,paused:!!options.paused,mode:options.mode,maxTurns:options.maxTurns,queueLength:queued.length,runState,health,sharedWith:this.store.rooms().filter(other=>other.id!==room.id&&this.shares(other.id,room.id)).map(other=>({roomId:other.id,title:other.title}))};
+    const bindingConflicts=this.store.bindingConflicts(room.id),bindingStatus=bindingConflicts.length?'conflict':!room.codexId||!room.deepseekId?'unbound':'ready';
+    const runState=room.archived?'idle':flight.some(d=>d.status!=='unknown')?'running':bindingStatus==='conflict'?'waiting':bindingStatus==='unbound'?'unbound':waiting?'waiting':options.paused?'paused':queued.length?'queued':'idle';
+    return {...room,paused:!!options.paused,mode:options.mode,maxTurns:options.maxTurns,queueLength:queued.length,runState,health,bindingStatus,bindingConflicts,sharedWith:[...new Map(bindingConflicts.map(conflict=>[conflict.roomId,{roomId:conflict.roomId,title:conflict.title}])).values()]};
   }
   state(roomId=this.defaultRoom()){
     if(this.store.deletedRef('room',roomId))roomId=this.store.activeRoomId();const room=this.requireRoom(roomId),base=this.store.state(roomId),options=this.store.roomOptions(roomId),rooms=this.store.rooms().map(r=>this.describe(r)),view=rooms.find(r=>r.id===roomId);
