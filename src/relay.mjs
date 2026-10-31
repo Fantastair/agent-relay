@@ -1,4 +1,5 @@
 import {id,envelope,parseEnvelope,batchEnvelope,parseBatchEnvelope,signals,safeError,RelayError,sleep} from './util.mjs';
+import {reconcileTurn} from './turn-deliveries.mjs';
 export const SIDES=['codex','deepseek'];
 const terminal=s=>['completed','failed','interrupted','blocked'].includes(s);
 export const isControl=t=>t.inputs.some(i=>i.text.startsWith('[relay-control id='));
@@ -72,7 +73,7 @@ export class Relay{
       const messageId=id();this.store.root(messageId,this.store.get('maxTurns',6));
       const m=this.store.addMessage({id:messageId,sender,text,roomId,nativeKey,meta:{targets,origin,...(images.length?{images,image:images[0]}:{}),...(clientMessageId?{clientMessageId}:{})}});
       for(const side of targets)this.store.enqueue(m,side,{force:true});return m;
-    });this.notify();return msg;
+    });this.notify();for(const side of targets)this.wake?.(side);return msg;
   }
   protocolState(){const ready=this.store.get('protocolReady',{}),valid={};for(const side of SIDES){const entry=ready[side];valid[side]=entry?.sessionId===this.sessionId(side)&&this.sessionId(side)?entry:null;}return {mode:valid.codex&&valid.deepseek&&valid.codex.version===valid.deepseek.version?'compact':'reminder',ready:valid};}
   imageCapability(side){const sessionId=this.sessionId(side),entry=this.store.imageCapability(side,sessionId)||this.store.get('imageCapabilities',{})[side];return entry?.sessionId===sessionId&&sessionId?entry:{supportsImages:'unknown',imageMode:'file-tools',sessionId};}
@@ -91,26 +92,25 @@ export class Relay{
         return (single&&this.store.deletedRef('message',single.id))||(batch&&this.store.deletedRef('batch',batch.id))||this.store.deletedRef('request',input.requestId,side,sessionId);
       });
       if(deleted){if(terminal(turn.status))this.store.markSeen(side,sessionId,'turn:'+turn.id);continue;}
-      const matches=d=>d&&d.sessionId===sessionId;
-      // Never split untrusted message bodies on inner headers. Recover the exact
-      // persisted batch, including its immutable membership and destination.
-      let batch=null;
-      for(const input of turn.inputs){const header=parseBatchEnvelope(input.text);if(!header||header.side!==side)continue;const saved=this.store.batch(header.id);if(saved?.side===side&&saved.sessionId===sessionId&&saved.deliveryIds.length===header.count&&saved.payload.replace(/\r\n/g,'\n')===input.text.replace(/\r\n/g,'\n')){batch=saved;break;}}
-      const linked=turn.inputs.map(i=>({input:i,env:parseEnvelope(i.text)})).find(x=>x.env&&matches(this.store.forMessage(x.env.id,side))&&!this.store.forMessage(x.env.id,side).batchId);
-      let delivery=linked?this.store.forMessage(linked.env.id,side):this.store.jobs(side,['running','unknown']).find(d=>matches(d)&&(d.receipt?.nativeTurnId===turn.id||turn.inputs.some(i=>i.requestId===(d.batchId||d.id))));
-      if(!batch&&delivery?.batchId)batch=this.store.batch(delivery.batchId);
-      if(batch)delivery=this.store.batchDeliveries(batch.id).at(-1);
-      if(delivery?.status==='cancelled'&&!delivery.receipt?.nativeTurnId)this.updateUnit(delivery,'cancelled',{receipt:{...delivery.receipt,nativeTurnId:turn.id,requestId:batch?.id||delivery.id,...(batch?{batchId:batch.id}:{})}});
-      if(!batch&&(!delivery&&turn.inputs.some(input=>parseEnvelope(input.text))||turn.inputs.some(input=>parseBatchEnvelope(input.text)))){if(terminal(turn.status)&&!this.store.seen(side,sessionId,'turn:'+turn.id)){this.store.log('attention','无法核对信封原文与投递成员，已跳过该轮自动转发，请回查原生记录',originRoomId);this.store.markSeen(side,sessionId,'turn:'+turn.id);}continue;}
-      if(delivery&&!['completed','cancelled'].includes(delivery.status)){
-        const receipt={...delivery.receipt,nativeTurnId:turn.id,requestId:batch?.id||delivery.id,...(batch?{batchId:batch.id}:{})};
-        if(terminal(turn.status)&&turn.status!=='completed')this.updateUnit(delivery,turn.status==='blocked'?'blocked':'failed',{receipt,error:`原生轮次 ${turn.status}${turn.reason?'：'+turn.reason:''}`});
-        else this.updateUnit(delivery,terminal(turn.status)?'completed':'running',{receipt,error:null});
-      }
-      if(!terminal(turn.status)||this.store.seen(side,sessionId,'turn:'+turn.id))continue;
-      this.store.transaction(()=>{if(isControl(turn)){this.store.markSeen(side,sessionId,'turn:'+turn.id);return;}let parent=delivery?this.store.message(delivery.messageId):null;
+      const {members,delivery,batch,pending}=reconcileTurn(this,side,sessionId,turn,originRoomId);
+      if(!members.length&&turn.inputs.some(input=>parseEnvelope(input.text)||parseBatchEnvelope(input.text))){if(terminal(turn.status)&&!this.store.seen(side,sessionId,'turn:'+turn.id)){this.store.log('attention','无法核对信封原文与投递成员，已跳过该轮自动转发，请回查原生记录',originRoomId);this.store.markSeen(side,sessionId,'turn:'+turn.id);}continue;}
+      if(pending||!terminal(turn.status)||this.store.seen(side,sessionId,'turn:'+turn.id))continue;
+      this.store.transaction(()=>{if(isControl(turn)&&!members.length){this.store.markSeen(side,sessionId,'turn:'+turn.id);return;}let parent=delivery?this.store.message(delivery.messageId):null;
         if(!parent){const user=turn.inputs.find(i=>i.kind==='user'&&!parseEnvelope(i.text)&&!parseBatchEnvelope(i.text));if(user){const key=`${side}:${sessionId}:user:${user.id}`;parent=this.store.nativeMessage(key);if(!parent){const rootId=id();this.store.root(rootId,this.store.get('maxTurns',6));parent=this.store.addMessage({id:rootId,sender:'user',text:user.text,rootId,nativeKey:key,roomId:originRoomId,meta:{native:true,side,nativeTurnId:turn.id}});}}}
-        const rawText=turn.outputs.map(o=>o.text).join('\n\n');if(rawText.trim()&&turn.status==='completed'){const flags=signals(rawText),messageId=id();const rootId=parent?.rootId||messageId;this.store.root(rootId,this.store.get('maxTurns',6));const m=this.store.addMessage({id:messageId,sender:side,text:flags.text,replyTo:parent?.id||null,rootId,hop:(parent?.hop||0)+1,roomId:parent?.roomId||originRoomId,nativeKey:`${side}:${sessionId}:final:${turn.id}`,meta:{nativeTurnId:turn.id,stop:flags.stop,wait:flags.wait,...(flags.silent?{silent:true,control:'no-reply'}:{}),outputIds:turn.outputs.map(o=>o.id),...(batch?{batchId:batch.id,inReplyToMessageIds:this.store.batchDeliveries(batch.id).map(d=>d.messageId)}:{})}});if(!this.changingRoom&&m.roomId===this.store.activeRoomId()&&!flags.silent&&!flags.stop&&!flags.wait&&delivery?.status!=='cancelled'&&this.store.get('mode','auto')==='auto'){const other=side==='codex'?'deepseek':'codex';if(this.sessionId(other)){if(Buffer.byteLength(m.text,'utf8')>128000)this.store.log('attention','回复超过自动投递大小限制，请手动整理后发送',m.roomId);else{const r=this.store.enqueue(m,other);if(r.limited)this.store.log('budget','本次消息已达到自动协作轮次上限，等待用户继续。',m.roomId);}}}if(flags.wait)this.store.log('attention',`${side==='codex'?'Codex':'DeepSeek'} 正在等待用户回答或确认。`,m.roomId);}
+        const rawText=turn.outputs.map(o=>o.text).join('\n\n');
+        if(rawText.trim()&&turn.status==='completed'){
+          const flags=signals(rawText),messageId=id(),rootId=parent?.rootId||messageId;
+          this.store.root(rootId,this.store.get('maxTurns',6));
+          const m=this.store.addMessage({id:messageId,sender:side,text:flags.text,replyTo:parent?.id||null,rootId,hop:(parent?.hop||0)+1,roomId:parent?.roomId||originRoomId,nativeKey:`${side}:${sessionId}:final:${turn.id}`,meta:{nativeTurnId:turn.id,stop:flags.stop,wait:flags.wait,...(flags.silent?{silent:true,control:'no-reply'}:{}),outputIds:turn.outputs.map(o=>o.id),...(members.length?{inReplyToMessageIds:members.map(d=>d.messageId)}:{}),...(batch?{batchId:batch.id}:{})}});
+          if(!this.changingRoom&&m.roomId===this.store.activeRoomId()&&!flags.silent&&!flags.stop&&!flags.wait&&(!members.length||members.some(d=>d.status!=='cancelled'))&&this.store.get('mode','auto')==='auto'){
+            const other=side==='codex'?'deepseek':'codex';
+            if(this.sessionId(other)){
+              if(Buffer.byteLength(m.text,'utf8')>128000)this.store.log('attention','回复超过自动投递大小限制，请手动整理后发送',m.roomId);
+              else{const r=this.store.enqueue(m,other);if(r.limited)this.store.log('budget','本次消息已达到自动协作轮次上限，等待用户继续。',m.roomId);else this.wake?.(other);}
+            }
+          }
+          if(flags.wait)this.store.log('attention',`${side==='codex'?'Codex':'DeepSeek'} 正在等待用户回答或确认。`,m.roomId);
+        }
         this.store.markSeen(side,sessionId,'turn:'+turn.id);});}}
   prepareBatch(side,queue,roomId,sessionId){
     const first=queue[0];if(first.batchId)return this.store.batch(first.batchId);
@@ -136,8 +136,8 @@ export class Relay{
       if(this.closed||epoch!==this.epoch[side])return;
       this.ingest(side,sessionId,snapshot);
       this.health[side]={ok:true,state:snapshot.state,title:snapshot.title,cwd:snapshot.cwd,checkedAt:Date.now(),endpoint:side==='deepseek'?this.adapters[side].base:undefined};
-      const inFlight=this.store.jobs(side,['sending','running','unknown']);
-      if(!this.store.get('paused',true)&&!inFlight.length&&snapshot.state!=='running'){
+      const inFlight=this.store.jobs(side,['sending','running','unknown']),steer=this.adapters[side].supportsSteer===true;
+      if(!this.store.get('paused',true)&&!inFlight.some(d=>d.status==='sending'||d.status==='unknown')&&(steer||(!inFlight.length&&snapshot.state!=='running'))){
         const queue=this.store.jobs(side),next=queue[0];
         if(next){
           if(next.roomId!==roomId||next.sessionId!==sessionId){
@@ -156,9 +156,10 @@ export class Relay{
             // the queued unit during that read. Never send a cancelled batch.
             if(this.deliveryUnit(unit).some(member=>member.status!=='queued'))return;
             if(this.deliveryUnit(unit).some(member=>this.store.message(member.messageId).meta.images?.length)&&this.imageCapability(side).supportsImages===false){this.updateUnit(unit,'blocked',{error:'接收方已声明不支持读取图片'});this.store.set('paused',true);this.notify();return;}
-            this.updateUnit(unit,'sending',{error:null});this.notify();
-            try{const result=await this.adapters[side].send(next.sessionId,payload,requestId),receipt={...result,...(batch?{batchId:batch.id}:{})};this.updateUnit(unit,'running',{receipt,error:null});}
-            catch(e){if(e.code==='busy')this.updateUnit(unit,'queued',{receipt:null,error:null});else this.updateUnit(unit,e.uncertain?'unknown':'failed',{receipt:e.uncertain?e.receipt||null:undefined,error:safeError(e)});}
+            const intent={requestId,requestedMode:steer?'steer':'start',observedActiveTurnId:snapshot.turns.find(t=>t.status==='inProgress')?.id||null,beforeSeq:snapshot.watermark??null,...(batch?{batchId:batch.id}:{})};
+            this.updateUnit(unit,'sending',{receipt:intent,error:null});this.notify();
+            try{const result=await this.adapters[side].send(next.sessionId,payload,requestId),receipt={...intent,...result};this.updateUnit(unit,'running',{receipt,error:null});if(this.store.jobs(side).length)this.wake?.(side);}
+            catch(e){if(e.code==='busy')this.updateUnit(unit,'queued',{receipt:null,error:null});else this.updateUnit(unit,e.uncertain?'unknown':'failed',{receipt:e.uncertain?{...intent,...e.receipt}:null,error:safeError(e)});}
           }
         }
       }

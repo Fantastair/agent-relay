@@ -350,3 +350,17 @@ M1/M3/M4/M5 沿用已确认实现；M2 双方同意不按超时自动判空闲�
 - `health[side].checkedAt`仅表示最近健康观察的时间，图片声明时间单独放在`imageCheckedAt`；图片能力查询/声明接口自身的`checkedAt`语义不变。不得用长期保留的图片声明时间覆盖健康更新时间。
 
 确认：Codex / DeepSeek，提案 `health-image-v3`。
+
+## 17. 引导优先投递（steer-delivery-v1，2026-10-31，双方确认）
+
+- 用户消息、手动转发、自动接力及带图信封统一引导优先：运行中追加输入，空闲时启动新轮；不等待已有原生轮次结束。仍保留持久投递台账、暂停/归档、1:1 绑定、预算、并行槽位和附件完整性检查。未知准入阻止后续新增投递，直到回查或人工处理。已有排队批次的成员与载荷不变。
+- `state.deliveries[]` 新增可空的 `deliveryMode: "start"|"steer"|null`、`nativeTurnId:string|null`、`acceptedAt:number|null`（毫秒）。字段从持久化 receipt 派生，导出亦包含；queued/sending 或尚未确认模式时为 null，不能把投递意图显示成实际模式。receipt 同时保留 `requestedMode`、`observedActiveTurnId`、DSH `beforeSeq` 供回查。旧数据无需改写。
+- Codex 通过已发现的桌面 owner 调用 `thread-follower-steer-turn`，返回实际 turnId 后标 steer；空闲时走 start。只有原生明确拒绝“无活动轮次”，且再次读取确认为空闲，才可改走 start。IPC/传输超时、缺少有效轮次回执一律 unknown，不盲目重发。
+- DSH 的 `session/prompt` 固定使用 `mode:"steer"`，包括空闲情形。`accepted:true` 只代表准入，先记 acceptedAt，mode/turn 保持 null；由原生 user 事件的 rpcId 或原样信封确认实际轮次。若落在投递前观察到的活动轮则为 steer；顺延到其他轮或原先空闲则为 start。不能仅凭发送前 busy 状态声称“已注入当前轮”。
+- 同一 `(side,sessionId,nativeTurnId)` 可以关联多条独立投递和批次。逐条/逐批核对独立身份，统一完成；最终回复只落库、转发一次，`meta.inReplyToMessageIds` 按持久投递顺序列出全部对应消息，replyTo/root 沿用最新关联消息。只有全部成员属于同一批次时保留单一 meta.batchId。start 可在 UI 中标主投递，steer 为轮内补充。
+- 若旧终态快照缺少一个已准入到本轮、但尚未可见的引导输入，暂不转发该终态，等待完整回查；不把 pending 投递擅自算完成。原生失败/中断仍更新各自回执；纯静默控制仍完成投递、不产生可见气泡或继续接力。
+- 两个适配器声明 `supportsSteer:true`，通过话题 health 暴露；不要求用户逐会话手工声明。旧/模拟适配器未声明时沿用串行等待行为。新消息和已确认投递后的剩余队列唤醒调度，周期轮询保留为兜底。
+- UI 沿用现有 status，组合展示“待投递 / 已接受、轮次待确认 / 已注入当前轮 / 已启动新轮 / 待回查”；同轮引导可折叠，回复显示关联消息数。CLI、技能、README 由 DeepSeek 维护；后端及测试由 Codex 维护。
+- `GET /api/health.features` 增加 `steer-delivery-v1`。隔离预览为 `scripts/steer-preview.mjs`（4335），使用模拟适配器和独立 data-dev；绝不连接正式原生会话。
+
+确认：Codex / DeepSeek，提案 `steer-delivery-v1`。

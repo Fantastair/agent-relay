@@ -60,6 +60,7 @@ export class ParallelRelay{
   engine(roomId=this.defaultRoom()){
     this.requireRoom(roomId);let engine=this.engines.get(roomId);if(engine)return engine;
     const native=Object.fromEntries(SIDES.map(side=>[side,{
+      supportsSteer:this.adapters[side].supportsSteer===true,
       snapshot:async(sessionId,options)=>{
         const key=resourceKey(side,sessionId);let request=this.snapshots.get(key);
         if(!request){request=Promise.resolve().then(()=>this.adapters[side].snapshot(sessionId,options));this.snapshots.set(key,request);}
@@ -73,7 +74,7 @@ export class ParallelRelay{
         return this.adapters[side].send(sessionId,text,requestId);
       },
     }]));
-    engine=new Relay(scopedStore(this,roomId),native,{images:this.images});engine.onChange=()=>this.notify();
+    engine=new Relay(scopedStore(this,roomId),native,{images:this.images});engine.onChange=()=>this.notify();engine.wake=side=>this.wake(side);
     engine.assertActiveRoom=target=>{const room=this.requireRoom(roomId);if(target!==roomId||room.archived)throw new RelayError('归档话题只读，请先恢复','input');if(this.mutations.has(roomId))throw new RelayError('正在配置该话题','busy');this.store.assertBindingAvailable(roomId,room);if(!room.codexId||!room.deepseekId)throw new RelayError('此话题尚未绑定完整的一对会话，请先连接 Codex 和 DeepSeek','binding');};
     this.engines.set(roomId,engine);return engine;
   }
@@ -111,15 +112,15 @@ export class ParallelRelay{
   eligible(room){
     if(room.archived||!room.codexId||!room.deepseekId||this.store.bindingConflicts(room.id).length||this.mutations.has(room.id)||this.store.roomOptions(room.id).paused)return false;
     if(SIDES.some(side=>this.store.jobs(side,['unknown','blocked','failed'],room.id).length))return false;
-    return SIDES.some(side=>this.store.jobs(side,['queued'],room.id).length&&this.sessionId(side,room.id)&&this.sessionHealth.get(resourceKey(side,this.sessionId(side,room.id)))?.ok===true&&this.sessionHealth.get(resourceKey(side,this.sessionId(side,room.id)))?.state!=='running');
+    return SIDES.some(side=>this.store.jobs(side,['queued'],room.id).length&&this.sessionId(side,room.id)&&this.sessionHealth.get(resourceKey(side,this.sessionId(side,room.id)))?.ok===true&&(this.adapters[side].supportsSteer===true||this.sessionHealth.get(resourceKey(side,this.sessionId(side,room.id)))?.state!=='running'));
   }
   claim(roomId){
     this.cleanLeases();
     if(this.store.get('pausedAll',false)||this.mutations.has(roomId)||this.store.bindingConflicts(roomId).length)return false;
     if(SIDES.some(side=>this.store.jobs(side,['unknown','blocked','failed'],roomId).length))return false;
     const limit=this.store.get('concurrencyLimit',2);
-    if(this.runningRooms().length>limit)return false;
     if(this.leases.has(roomId))return this.owns(roomId);
+    if(this.runningRooms().length>limit)return false;
     if(this.runningRooms().length>=limit)return false;
     const candidates=this.store.rooms().filter(room=>this.eligible(room)&&!this.leases.has(room.id)&&![...this.leases].some(other=>this.shares(room.id,other))).sort((a,b)=>this.compareRooms(a,b));
     if(candidates[0]?.id!==roomId)return false;
@@ -170,8 +171,9 @@ export class ParallelRelay{
       this.polling.set(key,operation);try{await operation;}finally{this.polling.delete(key);}
     }));
   }
+  wake(side){if(!this.timer||this.closed)return;this.wakeSides??=new Set();this.wakeSides.add(side);if(this.wakeTimer)return;this.wakeTimer=setTimeout(()=>{this.wakeTimer=null;const sides=[...this.wakeSides];this.wakeSides.clear();for(const target of sides)void this.tick(target);},20);}
   start(){this.timer=setInterval(()=>{for(const side of SIDES)void this.tick(side);},1800);for(const side of SIDES)void this.tick(side);}
-  async stop(){this.closed=true;clearInterval(this.timer);for(const engine of this.engines.values())engine.closed=true;await Promise.allSettled([...this.ticks]);this.adapters.codex.close?.();}
+  async stop(){this.closed=true;clearInterval(this.timer);clearTimeout(this.wakeTimer);for(const engine of this.engines.values())engine.closed=true;await Promise.allSettled([...this.ticks]);this.adapters.codex.close?.();}
   assertQueueSettled(roomId=this.defaultRoom()){if(SIDES.some(side=>this.store.jobs(side,unresolved,roomId).length))throw new RelayError('请先完成、取消或处理该话题的未完成投递','busy');}
   async reserveSides(sides,roomId=this.defaultRoom()){
     this.requireRoom(roomId);if(this.mutations.has(roomId))throw new RelayError('正在配置该话题','busy');this.mutations.add(roomId);
@@ -252,7 +254,7 @@ export class ParallelRelay{
   roomHealth(room){return Object.fromEntries(SIDES.map(side=>{
     const engine=this.engines.get(room.id),sessionId=room[bindingKey(side)],cached=this.sessionHealth.get(resourceKey(side,sessionId));
     const {checkedAt:imageCheckedAt,...capability}=this.imageCapability(side,room.id);
-    return [side,{...(cached||engine?.health[side]||{state:sessionId?'unknown':'unbound'}),...capability,...(imageCheckedAt!==undefined?{imageCheckedAt}:{})}];
+    return [side,{...(cached||engine?.health[side]||{state:sessionId?'unknown':'unbound'}),...capability,supportsSteer:this.adapters[side].supportsSteer===true,...(imageCheckedAt!==undefined?{imageCheckedAt}:{})}];
   }));}
   describe(room){
     const options=this.store.roomOptions(room.id),health=this.roomHealth(room),queued=SIDES.flatMap(side=>this.store.jobs(side,['queued'],room.id)),flight=this.flights(room.id);

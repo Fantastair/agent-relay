@@ -7,7 +7,7 @@ import {id,sleep,controlText,RelayError} from '../util.mjs';
 const textOf=x=>typeof x==='string'?x:x?.text||'';
 export function normalizeCodex(history){return (history.turns||[]).map(t=>({id:t.id,status:t.status,error:t.error,inputs:(t.items||[]).filter(i=>i.type==='userMessage'||i.type==='functionCallOutput').map(i=>({id:i.id,text:i.type==='userMessage'?(i.content||[]).map(c=>c.text||'').join(''):textOf(i.output),kind:i.type==='userMessage'?'user':'tool'})),outputs:(t.items||[]).filter(i=>i.type==='agentMessage'&&(i.phase==='final_answer'||i.phase==null)).map(i=>({id:i.id,text:i.text||''}))}));}
 export class CodexAdapter{
-  constructor(config={}){this.config=config;this.pipe=null;this.catalog=null;this.lastDiscover=0;}
+  constructor(config={}){this.config=config;this.pipe=null;this.catalog=null;this.lastDiscover=0;this.supportsSteer=true;}
   callerThreadId(preferred=this.config.sourceThreadId){
     let db;
     try{
@@ -47,6 +47,43 @@ export class CodexAdapter{
   async create({title,target}){const nonce=id();const r=await this.tool('create_thread',{title,target:target||{type:'projectless',directoryName:'agent-relay'},prompt:controlText(nonce)});if(!r.threadId)throw new RelayError('Codex 会话创建未返回 ID，需人工回查，不自动重试','unknown_creation',true);return {id:r.threadId,controlNonce:nonce};}
   async snapshot(threadId,{knownTurn}={}){let cursor,turns=[],first;for(let page=0;page<12;page++){const r=await this.tool('read_thread',{threadId,hostId:'local',turnLimit:10,includeOutputs:false,maxOutputCharsPerItem:0,...cursor?{cursor}:{}});first||=r;turns.push(...(r.turns||[]));if(!r.page?.hasMore||!r.page.nextCursor||!knownTurn||(r.turns||[]).some(t=>knownTurn(t.id)))break;cursor=r.page.nextCursor;if(page===11)throw new RelayError('Codex 历史积压超出本次读取范围，暂停以避免跳过消息','history_gap');}const raw={...first,turns};return {side:'codex',id:threadId,title:first.thread?.title||threadId,cwd:first.thread?.cwd,state:first.thread?.status?.type==='active'?'running':first.thread?.status?.type||'idle',turns:normalizeCodex(raw),raw};}
   async ensure(threadId){let owner=await this.owner(threadId);if(owner)return owner;const nonce=id();await this.tool('send_message_to_thread',{threadId,hostId:'local',prompt:controlText(nonce)});const start=Date.now();while(Date.now()-start<180000){const s=await this.snapshot(threadId);const turn=s.turns.find(t=>t.inputs.some(i=>i.text.includes(`[relay-control id=${nonce}]`)));if(turn?.status==='completed'){owner=await this.owner(threadId);if(owner)return owner;throw new RelayError('Codex 握手完成但持有者不可用','recovery');}if(turn&&['failed','interrupted','blocked'].includes(turn.status))throw new RelayError('Codex 恢复握手未完成，请检查原生会话','recovery');await sleep(1200);}throw new RelayError('Codex 恢复握手超时，请检查原应用；业务消息尚未发送','recovery_timeout');}
-  async send(threadId,text,requestId){const snap=await this.snapshot(threadId);if(snap.state==='running')throw new RelayError('Codex 正在工作，消息继续排队','busy');const owner=await this.ensure(threadId);const p=await this.ipc();try{const r=await p.request('thread-follower-start-turn',{conversationId:threadId,turnStart:{request:{threadId,input:[{type:'text',text,text_elements:[]}],clientUserMessageId:requestId},context:{inheritThreadSettings:true}}},{version:3,targetClientId:owner,hostId:'local',timeout:30000});if(r.resultType!=='success')throw new RelayError('Codex 未确认用户输入：'+r.error,'native_reject');const turn=r.result?.result?.turn;if(!turn?.id)throw new RelayError('Codex 用户输入响应缺少轮次 ID，需回查','unknown_outcome',true);return {nativeTurnId:turn.id,requestId,acceptedAt:Date.now()};}finally{p.close();}}
+  async follower(owner,method,params,version){
+    const p=await this.ipc();try{
+      // Route to the discovered owner. A top-level hostId filters this owner
+      // out on current desktop builds, although discovery uses hostId locally.
+      let r=await p.request(method,params,{version,targetClientId:owner,timeout:30000});
+      if(method==='thread-follower-start-turn'&&r.resultType==='error'&&r.error==='request-version-mismatch')r=await p.request(method,params,{version:version===2?3:2,targetClientId:owner,timeout:30000});
+      if(r.resultType!=='success'){
+        const uncertain=r.resultType!=='error'||/timeout|timed out|outcome.?unknown|transport|connection.*(?:lost|closed)/i.test(String(r.error));
+        throw new RelayError('Codex 未确认用户输入：'+r.error,uncertain?'unknown_outcome':'native_reject',uncertain);
+      }
+      return r.result?.result;
+    }finally{p.close();}
+  }
+  async send(threadId,text,requestId){
+    let snap=await this.snapshot(threadId);const active=snap.turns.find(t=>t.status==='inProgress');
+    const input=[{type:'text',text,text_elements:[]}];
+    const intent={requestId,requestedMode:'steer',observedActiveTurnId:active?.id||null};
+    try{
+      if(snap.state==='running'||active){
+        const owner=await this.owner(threadId);if(!owner)throw new RelayError('Codex 运行中但会话持有者不可用，暂不投递','busy');
+        try{
+          const r=await this.follower(owner,'thread-follower-steer-turn',{conversationId:threadId,input,clientUserMessageId:requestId,restoreMessage:{request:{threadId,input},context:{inheritThreadSettings:true},cwd:snap.cwd}},1);
+          if(!r?.turnId)throw new RelayError('Codex 引导响应缺少轮次 ID，需回查','unknown_outcome',true);
+          return {...intent,deliveryMode:'steer',nativeTurnId:r.turnId,acceptedAt:Date.now()};
+        }catch(e){
+          // Only an explicit inactive-turn rejection proves no input was
+          // admitted. Transport/timeout errors must never start another turn.
+          if(e.uncertain||e.code!=='native_reject'||!/NoActiveTurn|no active turn|active turn already ended|not being streamed/i.test(e.message))throw e;
+          snap=await this.snapshot(threadId);
+          if(snap.state==='running'||snap.turns.some(t=>t.status==='inProgress'))throw new RelayError('Codex 轮次已变化，重新读取后再引导','busy');
+        }
+      }
+      const owner=await this.ensure(threadId);
+      const r=await this.follower(owner,'thread-follower-start-turn',{conversationId:threadId,turnStart:{request:{threadId,input,clientUserMessageId:requestId},context:{inheritThreadSettings:true}}},2);
+      if(!r?.turn?.id)throw new RelayError('Codex 用户输入响应缺少轮次 ID，需回查','unknown_outcome',true);
+      return {...intent,deliveryMode:'start',nativeTurnId:r.turn.id,acceptedAt:Date.now()};
+    }catch(e){e.receipt={...intent,...e.receipt};throw e;}
+  }
   close(){this.pipe?.close();}
 }
