@@ -397,6 +397,8 @@ a{color:var(--blue)}
   display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
 }
 .job-err{margin:4px 0 0;font-size:10.5px;color:var(--red);line-height:1.45;word-break:break-word}
+.job-more{margin-top:4px;border:0;background:none;color:var(--blue);font-size:11px;cursor:pointer;padding:2px 0}
+.job-more:hover{text-decoration:underline}
 .job-actions{display:flex;gap:5px;margin-top:6px;flex-wrap:wrap}
 .job-actions button{
   border:1px solid var(--line-2);background:var(--surface);border-radius:7px;

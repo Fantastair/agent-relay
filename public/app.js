@@ -38,6 +38,7 @@ const S = {
   polling: false,
   signature: '',
   expanded: new Set(),
+  expandedJobs: new Set(),
   atBottom: true,
   unseen: 0,
   archivedOpen: false,
@@ -819,10 +820,10 @@ async function refreshQuota() {
 /* ---------------- activity ---------------- */
 
 function deliveryModeLabel(items) {
-  const allQueued = items.every(i => i.status === 'queued');
-  if (allQueued) return {label: '待投递', tone: 'info'};
-  const uncertain = items.some(i => ['unknown', 'blocked', 'failed'].includes(i.status));
-  if (uncertain) return {label: '待回查', tone: 'warn'};
+  if (items.every(i => i.status === 'queued')) return {label: '待投递', tone: 'info'};
+  if (items.some(i => i.status === 'sending')) return {label: '投递中', tone: 'info'};
+  if (items.some(i => ['unknown', 'blocked', 'failed'].includes(i.status))) return {label: '待回查', tone: 'warn'};
+  if (items.some(i => !i.acceptedAt)) return {label: '投递中', tone: 'info'};
   if (!items.every(i => i.nativeTurnId)) return {label: '已接受 · 轮次待确认', tone: 'warn'};
   if (items.some(i => i.deliveryMode === 'steer')) return {label: '已注入当前轮', tone: 'ok'};
   if (items.some(i => i.deliveryMode === 'start')) return {label: '已启动新轮', tone: 'ok'};
@@ -838,19 +839,22 @@ function renderJobs() {
   }
   const frag = document.createDocumentFragment();
   const groups = [];
-  const byBatch = new Map();
+  const byKey = new Map();
   for (const d of active.slice().reverse()) {
-    // 同一原生轮次的多条投递（启动 + 轮内引导）合并成一张卡，避免队列被引导刷屏。
-    const key = d.nativeTurnId ? 'turn:' + d.nativeTurnId : (d.batchId || d.id);
-    if (!byBatch.has(key)) {
+    // 同一侧、同一会话、同一原生轮次的多条投递合并成一张卡；批次只是其中一种来源。
+    const key = d.nativeTurnId
+      ? 'turn:' + [d.side, d.sessionId || '', d.nativeTurnId].join(':')
+      : (d.batchId || d.id);
+    if (!byKey.has(key)) {
       const group = {id: key, items: []};
-      byBatch.set(key, group);
+      byKey.set(key, group);
       groups.push(group);
     }
-    byBatch.get(key).items.push(d);
+    byKey.get(key).items.push(d);
   }
   for (const group of groups) {
     const d = group.items[0];
+    const batchId = group.items.length > 1 && d.batchId && group.items.every(i => i.batchId === d.batchId) ? d.batchId : null;
     const job = el('div', 'job');
     const head = el('div', 'job-head');
     const starts = group.items.filter(i => i.deliveryMode === 'start').length;
@@ -863,40 +867,80 @@ function renderJobs() {
     const mode = deliveryModeLabel(group.items);
     if (mode) head.append(el('span', 'chip ' + mode.tone, mode.label));
     job.append(head);
-    for (const item of group.items.slice(0, 4)) {
+
+    const expanded = S.expandedJobs.has(group.id);
+    const shown = expanded ? group.items : group.items.slice(0, 4);
+    for (const item of shown) {
       const msg = S.messages.find(m => m.id === item.messageId);
       job.append(el('p', 'job-text', msg?.text || item.messageId));
+    }
+    if (group.items.length > 4) {
+      const more = el('button', 'job-more', expanded ? '收起' : '展开其余 ' + (group.items.length - 4) + ' 条');
+      more.onclick = () => {
+        if (expanded) S.expandedJobs.delete(group.id);
+        else S.expandedJobs.add(group.id);
+        renderJobs();
+      };
+      job.append(more);
     }
     if (d.error) job.append(el('p', 'job-err', d.error));
 
     const acts = el('div', 'job-actions');
-    const count = group.items.length;
-    const allQueued = group.items.every(i => i.status === 'queued');
-    const allFailed = group.items.every(i => ['failed', 'blocked'].includes(i.status)) && group.items.every(i => !i.receipt);
-    const anyUncertain = group.items.some(i => ['unknown', 'blocked', 'failed'].includes(i.status));
-
-    if (allQueued) {
-      const b = el('button', null, count > 1 ? '取消整批（' + count + ' 条）' : '取消');
-      b.onclick = () => act(async () => { await api('cancel', {deliveryId: d.id}); await refresh(); });
-      acts.append(b);
-    }
-    if (allFailed) {
-      const b = el('button', null, count > 1 ? '重试整批（' + count + ' 条）' : '重试');
-      b.onclick = () => act(async () => { await api('retry', {deliveryId: d.id}); await refresh(); });
-      acts.append(b);
-    }
-    if (anyUncertain) {
-      const b = el('button', null, count > 1 ? '处理整批（' + count + ' 条）' : '回查后处理');
-      b.onclick = () => act(async () => {
-        const retry = confirm('请先在原生会话里回查' + (count > 1 ? '这 ' + count + ' 条（整批）' : '这条消息') + '。\n\n确定：确认未送达，重新排队（保持暂停）。\n取消：不重发，继续选择其他处理。');
-        if (retry) {
-          await api('resolve', {deliveryId: d.id, decision: 'not-delivered', confirmed: true});
-        } else if (confirm('是否已在原应用处理完毕，只解除整批的等待？这不会终止原任务。')) {
-          await api('resolve', {deliveryId: d.id, decision: 'handled', confirmed: true});
+    if (batchId) {
+      // 只有同一 batchId 才是真正的整批，仍可整批处理。
+      const count = group.items.length;
+      const allQueued = group.items.every(i => i.status === 'queued');
+      const allFailed = group.items.every(i => ['failed', 'blocked'].includes(i.status)) && group.items.every(i => !i.receipt);
+      const anyUncertain = group.items.some(i => ['unknown', 'blocked', 'failed'].includes(i.status));
+      if (allQueued) {
+        const b = el('button', null, '取消整批（' + count + ' 条）');
+        b.onclick = () => act(async () => { await api('cancel', {deliveryId: d.id}); await refresh(); });
+        acts.append(b);
+      }
+      if (allFailed) {
+        const b = el('button', null, '重试整批（' + count + ' 条）');
+        b.onclick = () => act(async () => { await api('retry', {deliveryId: d.id}); await refresh(); });
+        acts.append(b);
+      }
+      if (anyUncertain) {
+        const b = el('button', null, '处理整批（' + count + ' 条）');
+        b.onclick = () => act(async () => {
+          const retry = confirm('请先在原生会话里回查这 ' + count + ' 条（整批）。\n\n确定：确认未送达，重新排队（保持暂停）。\n取消：不重发，继续选择其他处理。');
+          if (retry) {
+            await api('resolve', {deliveryId: d.id, decision: 'not-delivered', confirmed: true});
+          } else if (confirm('是否已在原应用处理完毕，只解除整批的等待？这不会终止原任务。')) {
+            await api('resolve', {deliveryId: d.id, decision: 'handled', confirmed: true});
+          }
+          await refresh();
+        });
+        acts.append(b);
+      }
+    } else {
+      // 同轮不同投递：每个投递是独立单元，逐条给操作，不冒充整批。
+      for (const item of group.items) {
+        const label = '#' + String(item.id).slice(0, 6);
+        if (item.status === 'queued') {
+          const b = el('button', null, '取消 ' + label);
+          b.onclick = () => act(async () => { await api('cancel', {deliveryId: item.id}); await refresh(); });
+          acts.append(b);
+        } else if (item.status === 'failed' && !item.receipt) {
+          const b = el('button', null, '重试 ' + label);
+          b.onclick = () => act(async () => { await api('retry', {deliveryId: item.id}); await refresh(); });
+          acts.append(b);
+        } else if (['unknown', 'blocked', 'failed'].includes(item.status)) {
+          const b = el('button', null, '回查 ' + label);
+          b.onclick = () => act(async () => {
+            const retry = confirm('请先在原生会话里回查这条消息。\n\n确定：确认未送达，重新排队（保持暂停）。\n取消：不重发，继续选择其他处理。');
+            if (retry) {
+              await api('resolve', {deliveryId: item.id, decision: 'not-delivered', confirmed: true});
+            } else if (confirm('是否已在原应用处理完毕，只解除这条的等待？这不会终止原任务。')) {
+              await api('resolve', {deliveryId: item.id, decision: 'handled', confirmed: true});
+            }
+            await refresh();
+          });
+          acts.append(b);
         }
-        await refresh();
-      });
-      acts.append(b);
+      }
     }
     if (acts.childElementCount) job.append(acts);
     frag.append(job);
@@ -904,7 +948,8 @@ function renderJobs() {
   $('jobs').replaceChildren(frag);
 }
 
-function renderLogs() {  const logs = S.state?.logs || [];
+function renderLogs() {
+  const logs = S.state?.logs || [];
   $('logs').replaceChildren(...logs.slice(0, 20).map(l => el('div', 'log-line', clock(l.createdAt) + '  ' + l.text)));
 }
 
