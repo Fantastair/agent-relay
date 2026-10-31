@@ -823,6 +823,7 @@ function deliveryModeLabel(items) {
   if (items.every(i => i.status === 'queued')) return {label: '待投递', tone: 'info'};
   if (items.some(i => i.status === 'sending')) return {label: '投递中', tone: 'info'};
   if (items.some(i => ['unknown', 'blocked', 'failed'].includes(i.status))) return {label: '待回查', tone: 'warn'};
+  if (items.some(i => i.nativeTurnId === 'unscoped')) return {label: '轮次未归属 · 待核对', tone: 'warn'};
   if (items.some(i => !i.acceptedAt)) return {label: '投递中', tone: 'info'};
   if (!items.every(i => i.nativeTurnId)) return {label: '已接受 · 轮次待确认', tone: 'warn'};
   if (items.some(i => i.deliveryMode === 'steer')) return {label: '已注入当前轮', tone: 'ok'};
