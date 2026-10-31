@@ -336,11 +336,13 @@ async function send() {
   if (got && got !== side) throw new Error('后端把来源记成了 ' + got + '，已停止；请核对队列里是否已入队。');
   let mode = '';
   try {
-    for (let i = 0; i < 6 && !mode; i++) {
-      await new Promise(r => setTimeout(r, 400));
+    for (let i = 0; i < 12 && !mode; i++) {
+      await new Promise(r => setTimeout(r, 500));
       const st = await api('/api/state' + (roomId ? '?roomId=' + encodeURIComponent(roomId) : ''));
       const d = (st.deliveries || []).find(x => x.messageId === res.message.id);
-      if (!d || d.status === 'queued' || !d.acceptedAt) continue;
+      if (!d) continue;
+      if (['unknown', 'blocked', 'failed'].includes(d.status)) { mode = '待回查'; break; }
+      if (d.status === 'queued' || !d.acceptedAt) continue;
       const label = d.deliveryMode === 'steer' ? '已注入当前轮' : d.deliveryMode === 'start' ? '已启动新轮' : '已接受';
       mode = d.nativeTurnId ? label + ' · turn ' + String(d.nativeTurnId).slice(0, 8) : '已接受 · 轮次待确认';
     }
