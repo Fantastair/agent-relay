@@ -818,6 +818,17 @@ async function refreshQuota() {
 
 /* ---------------- activity ---------------- */
 
+function deliveryModeLabel(items) {
+  const allQueued = items.every(i => i.status === 'queued');
+  if (allQueued) return {label: '待投递', tone: 'info'};
+  const uncertain = items.some(i => ['unknown', 'blocked', 'failed'].includes(i.status));
+  if (uncertain) return {label: '待回查', tone: 'warn'};
+  if (!items.every(i => i.nativeTurnId)) return {label: '已接受 · 轮次待确认', tone: 'warn'};
+  if (items.some(i => i.deliveryMode === 'steer')) return {label: '已注入当前轮', tone: 'ok'};
+  if (items.some(i => i.deliveryMode === 'start')) return {label: '已启动新轮', tone: 'ok'};
+  return null;
+}
+
 function renderJobs() {
   const active = S.deliveries.filter(d => !['completed', 'cancelled'].includes(d.status));
   $('queue-count').textContent = String(active.length);
@@ -829,7 +840,8 @@ function renderJobs() {
   const groups = [];
   const byBatch = new Map();
   for (const d of active.slice().reverse()) {
-    const key = d.batchId || d.id;
+    // 同一原生轮次的多条投递（启动 + 轮内引导）合并成一张卡，避免队列被引导刷屏。
+    const key = d.nativeTurnId ? 'turn:' + d.nativeTurnId : (d.batchId || d.id);
     if (!byBatch.has(key)) {
       const group = {id: key, items: []};
       byBatch.set(key, group);
@@ -841,8 +853,15 @@ function renderJobs() {
     const d = group.items[0];
     const job = el('div', 'job');
     const head = el('div', 'job-head');
-    head.append(el('strong', null, NAMES[d.side] + (group.items.length > 1 ? ' · 合并 ' + group.items.length + ' 条' : '')));
+    const starts = group.items.filter(i => i.deliveryMode === 'start').length;
+    const steers = group.items.filter(i => i.deliveryMode === 'steer').length;
+    const detail = group.items.length > 1
+      ? '本轮 ' + group.items.length + ' 条' + (starts ? '（启动 ' + starts : '') + (steers ? (starts ? ' · ' : '（') + '引导 ' + steers : '') + (starts || steers ? '）' : '')
+      : '';
+    head.append(el('strong', null, NAMES[d.side] + (detail ? ' · ' + detail : '')));
     head.append(el('span', 'job-state ' + d.status, STATUS_LABEL[d.status] || d.status));
+    const mode = deliveryModeLabel(group.items);
+    if (mode) head.append(el('span', 'chip ' + mode.tone, mode.label));
     job.append(head);
     for (const item of group.items.slice(0, 4)) {
       const msg = S.messages.find(m => m.id === item.messageId);
@@ -885,8 +904,7 @@ function renderJobs() {
   $('jobs').replaceChildren(frag);
 }
 
-function renderLogs() {
-  const logs = S.state?.logs || [];
+function renderLogs() {  const logs = S.state?.logs || [];
   $('logs').replaceChildren(...logs.slice(0, 20).map(l => el('div', 'log-line', clock(l.createdAt) + '  ' + l.text)));
 }
 

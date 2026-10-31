@@ -150,7 +150,11 @@ async function status(json) {
   else console.log('最后消息 无');
   if (active.length) {
     console.log('待投递：');
-    active.slice(-8).forEach(d => console.log(`  #${d.id.slice(0, 6)} ${NAMES[d.side]} ${d.status} ${cut(d.error || '', 50)}`));
+    active.slice(-8).forEach(d => {
+      const mode = d.deliveryMode === 'steer' ? '引导' : d.deliveryMode === 'start' ? '启动' : '排队';
+      const turn = d.nativeTurnId ? ' · turn ' + String(d.nativeTurnId).slice(0, 8) : '';
+      console.log(`  #${d.id.slice(0, 6)} ${NAMES[d.side]} ${d.status} · ${mode}${turn} ${cut(d.error || '', 50)}`);
+    });
   } else {
     console.log('待投递：无');
   }
@@ -329,7 +333,18 @@ async function send() {
   const res = await api('/api/message', {text, targets: [to], sender: side, origin: 'agent', clientMessageId, ...(roomId ? {roomId} : {})});
   const got = res.message?.sender;
   if (got && got !== side) throw new Error('后端把来源记成了 ' + got + '，已停止；请核对队列里是否已入队。');
-  console.log('已入队 #' + (res.message?.id || '?').slice(0, 8) + ' → ' + NAMES[to] + (roomId ? '（话题 ' + roomId.slice(0, 8) + '）' : '') + '，来源 ' + side);
+  let mode = '';
+  try {
+    for (let i = 0; i < 4 && !mode; i++) {
+      await new Promise(r => setTimeout(r, 400));
+      const st = await api('/api/state' + (roomId ? '?roomId=' + encodeURIComponent(roomId) : ''));
+      const d = (st.deliveries || []).find(x => x.messageId === res.message.id);
+      if (!d) continue;
+      const label = d.deliveryMode === 'steer' ? '已注入当前轮' : d.deliveryMode === 'start' ? '已启动新轮' : '待投递';
+      mode = label + (d.nativeTurnId ? ' · turn ' + String(d.nativeTurnId).slice(0, 8) : '');
+    }
+  } catch {}
+  console.log('已入队 #' + (res.message?.id || '?').slice(0, 8) + ' → ' + NAMES[to] + (roomId ? '（话题 ' + roomId.slice(0, 8) + '）' : '') + (mode ? '，' + mode : '') + '，来源 ' + side);
 }
 
 /* ---------------- quota ---------------- */
