@@ -1,5 +1,15 @@
 import {DatabaseSync} from 'node:sqlite';
-import {id,RelayError} from './util.mjs';
+import {id,RelayError,isNativeTurnId} from './util.mjs';
+function checkedReceipt(previous,value){
+  if(value==null)return value;
+  const receipt={...value};
+  if('nativeTurnId'in receipt&&!isNativeTurnId(receipt.nativeTurnId)){
+    receipt.nativeTurnId=isNativeTurnId(previous?.nativeTurnId)?previous.nativeTurnId:null;
+    receipt.deliveryMode=receipt.nativeTurnId?previous.deliveryMode||null:null;
+  }
+  if(isNativeTurnId(previous?.nativeTurnId)&&isNativeTurnId(receipt.nativeTurnId)&&receipt.nativeTurnId!==previous.nativeTurnId)return previous;
+  return receipt;
+}
 export class Store{
   constructor(file){this.db=new DatabaseSync(file);this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=3000;
     CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
@@ -119,7 +129,12 @@ export class Store{
   delivery(deliveryId){return this.decodeDelivery(this.db.prepare('SELECT * FROM deliveries WHERE id=?').get(deliveryId));}
   forMessage(messageId,side){return this.decodeDelivery(this.db.prepare('SELECT * FROM deliveries WHERE message_id=? AND side=?').get(messageId,side));}
   enqueue(message,side,{force=false}={}){const existing=this.forMessage(message.id,side);if(existing)return {delivery:existing,existing:true};const room=this.requireRoom(message.roomId);if(room.id!==this.activeRoomId())throw new RelayError('历史话题不能直接投递，请先继续该话题','input');const max=this.db.prepare('SELECT max_turns FROM roots WHERE id=?').get(message.rootId)?.max_turns||6;const count=this.db.prepare("SELECT COUNT(*) AS n FROM deliveries d JOIN messages m ON m.id=d.message_id WHERE m.root_id=? AND d.status!='cancelled'").get(message.rootId).n;if(!force&&count>=max)return {limited:true};const deliveryId=id(),now=Date.now(),sessionId=side==='codex'?room.codexId:room.deepseekId;this.db.prepare('INSERT INTO deliveries(id,message_id,side,status,receipt,error,attempts,created_at,updated_at,room_id,session_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(deliveryId,message.id,side,'queued',null,null,0,now,now,room.id,sessionId);return {delivery:this.delivery(deliveryId)};}
-  updateDelivery(deliveryId,status,{receipt,error}={}){const old=this.delivery(deliveryId);if(!old)return;this.db.prepare('UPDATE deliveries SET status=?,receipt=?,error=?,attempts=?,updated_at=? WHERE id=?').run(status,receipt===undefined?(old.receipt?JSON.stringify(old.receipt):null):JSON.stringify(receipt),error===undefined?old.error:error,old.attempts+(status==='sending'?1:0),Date.now(),deliveryId);}
+  updateDelivery(deliveryId,status,{receipt,error}={}){
+    const old=this.delivery(deliveryId);if(!old)return;
+    if(['completed','cancelled'].includes(old.status)&&status!==old.status)return;
+    const saved=checkedReceipt(old.receipt,receipt===undefined?old.receipt:receipt);
+    this.db.prepare('UPDATE deliveries SET status=?,receipt=?,error=?,attempts=?,updated_at=? WHERE id=?').run(status,saved==null?null:JSON.stringify(saved),error===undefined?old.error:error,old.attempts+(status==='sending'?1:0),Date.now(),deliveryId);
+  }
   jobs(side,statuses=['queued'],roomId){if(!statuses.length)return [];return this.db.prepare(`SELECT * FROM deliveries WHERE side=? AND status IN (${statuses.map(()=>'?').join(',')})${roomId?' AND room_id=?':''} ORDER BY created_at,rowid`).all(side,...statuses,...(roomId?[roomId]:[])).map(d=>this.decodeDelivery(d));}
   batch(batchId){const row=this.db.prepare('SELECT * FROM batches WHERE id=?').get(batchId);return row?{id:row.id,side:row.side,roomId:row.room_id,sessionId:row.session_id,payload:row.payload,deliveryIds:JSON.parse(row.delivery_ids),status:row.status,receipt:row.receipt?JSON.parse(row.receipt):null,error:row.error,createdAt:row.created_at,updatedAt:row.updated_at}:null;}
   batchDeliveries(batchId){return (this.batch(batchId)?.deliveryIds||[]).map(deliveryId=>this.delivery(deliveryId));}
@@ -132,6 +147,8 @@ export class Store{
   });}
   updateBatch(batchId,status,options={}){return this.transaction(()=>{
     const batch=this.batch(batchId);if(!batch)throw new RelayError('批次不存在','input');
+    if(['completed','cancelled'].includes(batch.status)&&status!==batch.status)return;
+    options={...options,receipt:checkedReceipt(batch.receipt,options.receipt===undefined?batch.receipt:options.receipt)};
     for(const deliveryId of batch.deliveryIds)this.updateDelivery(deliveryId,status,options);
     this.db.prepare('UPDATE batches SET status=?,receipt=?,error=?,updated_at=? WHERE id=?').run(status,options.receipt===undefined?(batch.receipt?JSON.stringify(batch.receipt):null):JSON.stringify(options.receipt),options.error===undefined?batch.error:options.error,Date.now(),batchId);
   });}

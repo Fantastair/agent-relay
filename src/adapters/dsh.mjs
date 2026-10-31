@@ -5,7 +5,7 @@ import {createHash,createHmac} from 'node:crypto';
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {fileURLToPath} from 'node:url';
-import {id,sleep,RelayError} from '../util.mjs';
+import {id,sleep,RelayError,isNativeTurnId} from '../util.mjs';
 const exec=promisify(execFile),b64=b=>Buffer.from(b).toString('base64url');
 export function cookieFor(authority,secret,now=Date.now()){const body=b64(JSON.stringify({version:1,authority,issuedAt:now,expiresAt:now+3600000}));return 'dsh-auth-'+b64(createHash('sha256').update(authority).digest())+'=v1.'+body+'.'+b64(createHmac('sha256',secret).update(body).digest());}
 const textOf=v=>typeof v==='string'?v:Array.isArray(v)?v.filter(c=>c?.type==='text').map(c=>c.text||'').join(''):'';
@@ -40,7 +40,27 @@ export class DshAdapter{
   async create({workspaceId,title,onCreated}){if(!workspaceId)throw new RelayError('创建 DSH 通道必须指定 workspace','config');const sessionId='session-relay-'+id();await onCreated?.(sessionId);await this.api('session/create',{request:{sessionId,workspaceId,agentPreset:'standard'}});await this.api('session/rename',{request:{sessionId,title}});await this.verifyWorkspace(sessionId,workspaceId);return {id:sessionId};}
   async verifyWorkspace(sessionId,workspaceId){for(let i=0;i<12;i++){const spaces=await this.workspaces();if(spaces.some(w=>w.workspaceId===workspaceId&&w.sessionIds.includes(sessionId)))return;await sleep(250);}throw new RelayError('DSH 会话未加入 workspace，停止启用该通道。已保留会话 ID，请在原应用回查','persistence');}
   async page(sessionId,row){const throughSeq=row?.projections?.asOfSeq;if(!Number.isFinite(throughSeq))return {records:[],hasMore:false};return this.api('session/page',{request:{address:{kind:'session',sessionId},throughSeq,maxMessages:100}});}
-  async snapshot(sessionId,{knownTurn}={}){const rows=await this.list(),row=rows.find(r=>r.sessionId===sessionId);if(!row)throw new RelayError('绑定的 DSH 会话不存在，请在设置中重新选择；未自动替换','missing_session');if(row.archived||row.projections?.values?.archived)throw new RelayError('绑定的 DSH 会话已归档，请在原应用恢复','archived');let seq=row.projections?.asOfSeq,records=[];for(let count=0;count<12;count++){const page=await this.page(sessionId,{projections:{asOfSeq:seq}});records=[...(page.records||[]),...records];const turns=normalizeDsh(records,row);if(!page.hasMore||!knownTurn||turns.some(t=>knownTurn(t.id)))break;const min=Math.min(...page.records.map(r=>(r.event||r).seq));if(!Number.isFinite(min)||min<=0)break;seq=min-1;if(count===11)throw new RelayError('DSH 历史积压超出读取范围，暂停以避免遗漏','history_gap');}return {side:'deepseek',id:sessionId,title:row.projections?.values?.title||sessionId,cwd:row.cwd,state:row.running?'running':'idle',watermark:row.projections?.asOfSeq,turns:normalizeDsh(records,row)};}
+  async snapshot(sessionId,{knownTurn,receiptTargets=[]}={}){
+    const rows=await this.list(),row=rows.find(r=>r.sessionId===sessionId);
+    if(!row)throw new RelayError('绑定的 DSH 会话不存在，请在设置中重新选择；未自动替换','missing_session');
+    if(row.archived||row.projections?.values?.archived)throw new RelayError('绑定的 DSH 会话已归档，请在原应用恢复','archived');
+    let seq=row.projections?.asOfSeq,records=[],historyIncomplete=false,turns=[];
+    const missing=()=>receiptTargets.filter(target=>!turns.some(t=>(isNativeTurnId(target.nativeTurnId)&&t.id===target.nativeTurnId)||t.inputs.some(i=>i.requestId===target.requestId)));
+    for(let count=0;count<12;count++){
+      const page=await this.page(sessionId,{projections:{asOfSeq:seq}}),items=page.records||[],events=items.map(r=>r.event||r);
+      // A non-decreasing or malformed boundary cannot safely advance history.
+      // Keep already-read facts, but expose the gap rather than inventing a turn.
+      const min=events.length?Math.min(...events.map(e=>e.seq)):NaN;
+      if(events.some(e=>!Number.isSafeInteger(e.seq)||e.seq<0||e.seq>seq)||(!Number.isFinite(min)&&page.hasMore)){historyIncomplete=true;break;}
+      records=[...items,...records];turns=normalizeDsh(records,row);
+      if(!page.hasMore)break;
+      if(!missing().length&&(!knownTurn||turns.some(t=>knownTurn(t.id))))break;
+      if(missing().length&&missing().every(target=>Number.isFinite(target.beforeSeq)&&min<=target.beforeSeq))break;
+      if(!Number.isSafeInteger(min)||min<=0||count===11){historyIncomplete=true;break;}
+      seq=min-1;
+    }
+    return {side:'deepseek',id:sessionId,title:row.projections?.values?.title||sessionId,cwd:row.cwd,state:row.running?'running':'idle',watermark:row.projections?.asOfSeq,turns,historyIncomplete,unresolvedRequestIds:missing().map(target=>target.requestId)};
+  }
   async send(sessionId,text,requestId){
     const snap=await this.snapshot(sessionId),active=snap.turns.find(t=>t.status==='inProgress');
     const receipt={requestId,requestedMode:'steer',nativeTurnId:null,deliveryMode:null,beforeSeq:snap.watermark,observedActiveTurnId:active?.id||null};
@@ -53,7 +73,23 @@ export class DshAdapter{
     }catch(e){e.receipt=receipt;throw e;}
   }
 }
-export function normalizeDsh(records,row={}){const turns=new Map();let current=null;for(const wrapped of records){const e=wrapped.event||wrapped,d=e.data||{};if(d.turn!=null||d.turnId!=null)current=String(d.turn?.id??d.turn??d.turnId);if(e.type==='turn/start'){current||=String(e.seq);turns.set(current,{id:current,status:'inProgress',inputs:[],outputs:[],startSeq:e.seq});}if(!current)current='unscoped';if(!turns.has(current))turns.set(current,{id:current,status:'inProgress',inputs:[],outputs:[],startSeq:e.seq});const t=turns.get(current);if(e.type==='user/message'&&d.source?.kind==='user'){const text=textOf(d.content)||textOf(d.message?.content)||d.text||'';t.inputs.push({id:String(e.seq),text,kind:'user',requestId:d.source?.rpcId});}
+export function normalizeDsh(records,row={}){
+  const turns=new Map();let current=null;
+  for(const wrapped of records){
+    const e=wrapped.event||wrapped,d=e.data||{},explicit=d.turn?.id??d.turn??d.turnId;
+    if(explicit!=null){const value=typeof explicit==='number'||typeof explicit==='string'?String(explicit):null;current=isNativeTurnId(value)?value:null;}
+    // Head-of-page user messages without a preceding turn/step boundary have
+    // no trustworthy owner. Fetch earlier history; never attach them forward.
+    if(!current)continue;
+    if(!turns.has(current))turns.set(current,{id:current,status:'inProgress',inputs:[],outputs:[],partial:true});
+    const t=turns.get(current);
+    if(e.type==='turn/start'){t.startSeq=e.seq;t.partial=false;}
+    if(e.type==='user/message'&&d.source?.kind==='user')t.inputs.push({id:String(e.seq),text:textOf(d.content)||textOf(d.message?.content)||d.text||'',kind:'user',requestId:d.source?.rpcId});
     if(e.type==='assistant/message'){const text=textOf(d.message?.content)||textOf(d.content)||d.text||'';if(text)t.outputs=[{id:d.message?.id||String(e.seq),text}];}
-    if(e.type==='turn/end'){t.endSeq=e.seq;const reason=typeof d.reason==='string'?d.reason:d.reason?.kind;t.reason=reason;t.status=reason==='completed'?'completed':reason==='blocked'?'blocked':reason==='aborted'||reason==='interrupted'?'interrupted':'failed';}}
-  return [...turns.values()].filter(t=>t.inputs.length||t.outputs.length);}
+    if(e.type==='turn/end'){
+      t.endSeq=e.seq;const reason=typeof d.reason==='string'?d.reason:d.reason?.kind;t.reason=reason;
+      t.status=reason==='completed'?'completed':reason==='blocked'?'blocked':reason==='aborted'||reason==='interrupted'?'interrupted':'failed';current=null;
+    }
+  }
+  return [...turns.values()].filter(t=>t.inputs.length||t.outputs.length);
+}

@@ -1,5 +1,6 @@
 import {Relay,SIDES,isControl} from './relay.mjs';
 import {parseEnvelope,parseBatchEnvelope,RelayError,sleep,safeError} from './util.mjs';
+import {deliverySnapshotTargets} from './turn-deliveries.mjs';
 
 const bindingKey=side=>side==='codex'?'codexId':'deepseekId';
 const resourceKey=(side,sessionId)=>JSON.stringify([side,sessionId]);
@@ -63,7 +64,7 @@ export class ParallelRelay{
       supportsSteer:this.adapters[side].supportsSteer===true,
       snapshot:async(sessionId,options)=>{
         const key=resourceKey(side,sessionId);let request=this.snapshots.get(key);
-        if(!request){request=Promise.resolve().then(()=>this.adapters[side].snapshot(sessionId,options));this.snapshots.set(key,request);}
+        if(!request){request=Promise.resolve().then(()=>this.adapters[side].snapshot(sessionId,{...options,receiptTargets:deliverySnapshotTargets(this.store,side,sessionId)}));this.snapshots.set(key,request);}
         let snapshot;try{snapshot=await request;}catch(error){this.sessionHealth.set(key,{ok:false,state:'offline',error:safeError(error),checkedAt:Date.now()});throw error;}
         this.sessionHealth.set(key,{ok:true,state:snapshot.state,hasInProgressTurn:snapshot.turns.some(turn=>turn.status==='inProgress'),title:snapshot.title,cwd:snapshot.cwd,checkedAt:Date.now()});
         return {...snapshot,turns:snapshot.turns.filter(turn=>this.belongs(turn,side,sessionId,roomId))};
@@ -164,7 +165,7 @@ export class ParallelRelay{
       if(this.polling.has(key)||Date.now()<(this.historicalBackoff.get(key)||0))return;
       const sessionId=JSON.parse(key)[1];
       const operation=(async()=>{try{
-        const snapshot=await this.adapters[side].snapshot(sessionId,{knownTurn:turnId=>this.store.seen(side,sessionId,'turn:'+turnId)});
+        const snapshot=await this.adapters[side].snapshot(sessionId,{knownTurn:turnId=>this.store.seen(side,sessionId,'turn:'+turnId),receiptTargets:deliverySnapshotTargets(this.store,side,sessionId)});
         if(this.closed)return;
         for(const roomId of roomIds)if(this.store.room(roomId))this.ingest(side,sessionId,snapshot,roomId);
       }catch(error){this.historicalBackoff.set(key,Date.now()+60000);for(const roomId of roomIds)if(this.store.room(roomId))this.store.log('attention','旧会话回执暂时无法回查，未重发任何消息：'+safeError(error),roomId);}})();

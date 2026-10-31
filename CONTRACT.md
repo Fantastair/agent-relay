@@ -364,3 +364,15 @@ M1/M3/M4/M5 沿用已确认实现；M2 双方同意不按超时自动判空闲�
 - `GET /api/health.features` 增加 `steer-delivery-v1`。隔离预览为 `scripts/steer-preview.mjs`（4335），使用模拟适配器和独立 data-dev；绝不连接正式原生会话。
 
 确认：Codex / DeepSeek，提案 `steer-delivery-v1`。
+
+## 18. DSH 分页回执与终态保护（dsh-receipt-v2，2026-10-31，双方确认）
+
+- DSH 页面开头没有前置 turn/step 边界的 user/message 不归入任何猜测轮次，不生成 `unscoped`。读取时按未解决的 requestId / 已核实的原生轮次 ID 补读较早页面；遇到任意已 seen 的其他轮次不能提前结束回查。仍无归属时保持 nativeTurnId=null，不能把占位 ID 写入回执。
+- 补读最多12页；通过原生事件 seq 单调递减验证边界。空页仍声称 hasMore、seq 不合法或重复、达到页数上限时返回 historyIncomplete 与 unresolvedRequestIds。若已读过该请求的 beforeSeq，继续往前不可能找到这笔新准入，可结束本次补读并等待下一次轮询，不猜测归属。
+- 已接受但事件尚未可见的输入保留短暂等待窗口：忙碌时30秒，空闲时2.5秒；历史有缺口则立即转 unknown。仍无法确认的在途项进入“待回查”，不重发，也不继续追加其他输入；日后收到精确事件可自动回填。这个等待窗口不等同于声称已确定原生轮次。
+- 存储层与回执层共同保证 completed/cancelled 不回退，重启和迟到的 inProgress 片段也不能重开。已核实的原生轮次 ID 不被其他轮次或占位值覆盖；旧占位回执只能凭原样信封/requestId 补为真实 ID。
+- 新写入的 nativeTurnId 禁止空串、空白、unscoped/null/undefined 字符串；无法确定时使用 JSON null。真实时间上下文 source.kind=time-context 不计为第二次用户准入，只认 source.kind=user 的请求身份。
+- 对三条经用户授权手工解除的旧记录，保留 cancelled 与原有人工处理审计，可补核实的轮次66/7/6，不重开、不重复创建回复或自动接力。正式数据副本回放验证消息与投递数量不变。
+- 后端特性增加 dsh-receipt-v2。新增分页、终态、重启、占位写入及未知准入回归；前端保留轮次未归属提示，不能只靠隐藏卡片处理根因。
+
+确认：Codex / DeepSeek，提案 `dsh-receipt-v2`。

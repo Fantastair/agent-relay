@@ -1,5 +1,5 @@
 import {id,envelope,parseEnvelope,batchEnvelope,parseBatchEnvelope,signals,safeError,RelayError,sleep} from './util.mjs';
-import {reconcileTurn} from './turn-deliveries.mjs';
+import {reconcileTurn,deliverySnapshotTargets,reconcileMissingReceipts} from './turn-deliveries.mjs';
 export const SIDES=['codex','deepseek'];
 const terminal=s=>['completed','failed','interrupted','blocked'].includes(s);
 export const isControl=t=>t.inputs.some(i=>i.text.startsWith('[relay-control id='));
@@ -94,7 +94,7 @@ export class Relay{
       if(deleted){if(terminal(turn.status))this.store.markSeen(side,sessionId,'turn:'+turn.id);continue;}
       const {members,delivery,batch,pending}=reconcileTurn(this,side,sessionId,turn,originRoomId);
       if(!members.length&&turn.inputs.some(input=>parseEnvelope(input.text)||parseBatchEnvelope(input.text))){if(terminal(turn.status)&&!this.store.seen(side,sessionId,'turn:'+turn.id)){this.store.log('attention','无法核对信封原文与投递成员，已跳过该轮自动转发，请回查原生记录',originRoomId);this.store.markSeen(side,sessionId,'turn:'+turn.id);}continue;}
-      if(pending||!terminal(turn.status)||this.store.seen(side,sessionId,'turn:'+turn.id))continue;
+      if(pending||(turn.partial&&!members.length)||!terminal(turn.status)||this.store.seen(side,sessionId,'turn:'+turn.id))continue;
       this.store.transaction(()=>{if(isControl(turn)&&!members.length){this.store.markSeen(side,sessionId,'turn:'+turn.id);return;}let parent=delivery?this.store.message(delivery.messageId):null;
         if(!parent){const user=turn.inputs.find(i=>i.kind==='user'&&!parseEnvelope(i.text)&&!parseBatchEnvelope(i.text));if(user){const key=`${side}:${sessionId}:user:${user.id}`;parent=this.store.nativeMessage(key);if(!parent){const rootId=id();this.store.root(rootId,this.store.get('maxTurns',6));parent=this.store.addMessage({id:rootId,sender:'user',text:user.text,rootId,nativeKey:key,roomId:originRoomId,meta:{native:true,side,nativeTurnId:turn.id}});}}}
         const rawText=turn.outputs.map(o=>o.text).join('\n\n');
@@ -111,7 +111,9 @@ export class Relay{
           }
           if(flags.wait)this.store.log('attention',`${side==='codex'?'Codex':'DeepSeek'} 正在等待用户回答或确认。`,m.roomId);
         }
-        this.store.markSeen(side,sessionId,'turn:'+turn.id);});}}
+        this.store.markSeen(side,sessionId,'turn:'+turn.id);});}
+    reconcileMissingReceipts(this,side,sessionId,snapshot);
+  }
   prepareBatch(side,queue,roomId,sessionId){
     const first=queue[0];if(first.batchId)return this.store.batch(first.batchId);
     const candidates=[];
@@ -132,7 +134,7 @@ export class Relay{
     if(!sessionId){this.health[side]={ok:false,state:'unbound',error:'尚未绑定会话'};return;}
     this.busy[side]=true;const epoch=this.epoch[side];
     try{
-      const snapshot=await this.adapters[side].snapshot(sessionId,{knownTurn:tid=>this.store.seen(side,sessionId,'turn:'+tid)});
+      const snapshot=await this.adapters[side].snapshot(sessionId,{knownTurn:tid=>this.store.seen(side,sessionId,'turn:'+tid),receiptTargets:deliverySnapshotTargets(this.store,side,sessionId)});
       if(this.closed||epoch!==this.epoch[side])return;
       this.ingest(side,sessionId,snapshot);
       this.health[side]={ok:true,state:snapshot.state,title:snapshot.title,cwd:snapshot.cwd,checkedAt:Date.now(),endpoint:side==='deepseek'?this.adapters[side].base:undefined};
