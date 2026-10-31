@@ -507,8 +507,30 @@ async function ready() {
   console.log(JSON.stringify(res));
 }
 
-async function capability() {
-  const side = sideOf(flag('as'));
+async function stale() {
+  const st = await api('/api/state');
+  const bad = [];
+  for (const room of st.rooms || []) {
+    const rs = await api('/api/state?roomId=' + encodeURIComponent(room.id));
+    for (const d of rs.deliveries || []) {
+      if (!['running', 'sending', 'unknown'].includes(d.status)) continue;
+      if (d.nativeTurnId && d.nativeTurnId !== 'unscoped') continue;
+      bad.push({room, d});
+    }
+  }
+  if (!bad.length) return console.log('没有滞留投递（running/sending/unknown 且轮次未归属）');
+  for (const {room, d} of bad) {
+    console.log(`  ${room.title} · ${NAMES[d.side]} ${d.status} #${String(d.id).slice(0, 8)} turn=${d.nativeTurnId || '-'}`);
+  }
+  if (!has('fix')) {
+    console.log('确认这些轮次已在原应用结束后，加 --fix 按“已在原应用处理”解除。');
+    return;
+  }
+  for (const {d} of bad) await api('/api/resolve', {deliveryId: d.id, decision: 'handled', confirmed: true});
+  console.log(`已解除 ${bad.length} 条。相关话题可能被保持暂停，确认后手动恢复。`);
+}
+
+async function capability() {  const side = sideOf(flag('as'));
   const {room} = await resolveRoom(typeof flag('room') === 'string' ? flag('room') : null, {required: true});
   if (!room) throw new Error('缺少话题 ID：用 --room 指定');
   const sessionId = (typeof flag('session') === 'string' && flag('session')) || room?.[side === 'codex' ? 'codexId' : 'deepseekId'];
@@ -529,6 +551,7 @@ const HELP = `relay-cli — 中转台补充通道
   quota [--json]              查询 DeepSeek / Codex 额度
   ready --as <side> [--version 1.0.0]   声明已加载协作协议版本
   capability --as <side> --room <话题> [--supports true|false]   声明图片能力
+  stale [--fix]               列出并解除轮次未归属的滞留投递
   mail --subject "…" --text "…" [--to a@b.com]
 
 side ∈ codex | deepseek
@@ -542,6 +565,7 @@ try {
   else if (cmd === 'quota') await quota();
   else if (cmd === 'ready') await ready();
 else if (cmd === 'capability') await capability();
+else if (cmd === 'stale') await stale();
   else if (cmd === 'mail') await mail();
   else { console.error('未知命令：' + cmd); console.log(HELP); process.exitCode = 1; }
 } catch (e) {
